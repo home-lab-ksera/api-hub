@@ -35,6 +35,25 @@ fn get_optional_string(root: nojson::RawJsonValue<'_, '_>, name: &str) -> Option
     String::try_from(value).ok()
 }
 
+fn response_body_to_text(body: Vec<u8>) -> Result<String, Box<dyn StdError>> {
+    String::from_utf8(body)
+        .map_err(|e| Box::<dyn StdError>::from(std::io::Error::other(e.to_string())))
+}
+
+fn ensure_slack_ok(response: &str) -> Result<(), Box<dyn StdError>> {
+    let parsed = nojson::RawJson::parse(response)?;
+    let root = parsed.value();
+    let ok = get_required_bool(root, "ok")?;
+
+    if !ok {
+        let error_message =
+            get_optional_string(root, "error").unwrap_or_else(|| "unknown_error".to_string());
+        return Err(Box::new(std::io::Error::other(error_message)));
+    }
+
+    Ok(())
+}
+
 #[instrument(skip(client, slack_bot_token, text), fields(channel = %channel))]
 pub async fn post_message(
     client: &HttpClient,
@@ -73,22 +92,14 @@ pub async fn post_message(
         })
         .await?;
 
-    let response = String::from_utf8(response.body)
-        .map_err(|e| Box::<dyn StdError>::from(std::io::Error::other(e.to_string())))?;
-
-    let parsed = nojson::RawJson::parse(&response)?;
-    let root = parsed.value();
-    let ok = get_required_bool(root, "ok")?;
-
-    if !ok {
-        let error_message =
-            get_optional_string(root, "error").unwrap_or_else(|| "unknown_error".to_string());
+    let response = response_body_to_text(response.body)?;
+    if let Err(e) = ensure_slack_ok(&response) {
         warn!(
-            error = %error_message,
+            error = %e,
             channel = %channel,
             "Slack API returned error response"
         );
-        return Err(Box::new(std::io::Error::other(error_message)));
+        return Err(e);
     }
 
     debug!(
@@ -133,24 +144,18 @@ pub async fn upload_file(
         })
         .await?;
 
-    let response = String::from_utf8(response.body)
-        .map_err(|e| Box::<dyn StdError>::from(std::io::Error::other(e.to_string())))?;
-
-    let parsed = nojson::RawJson::parse(&response)?;
-    let root = parsed.value();
-    let ok = get_required_bool(root, "ok")?;
-
-    if !ok {
-        let error_message =
-            get_optional_string(root, "error").unwrap_or_else(|| "unknown_error".to_string());
+    let response = response_body_to_text(response.body)?;
+    if let Err(e) = ensure_slack_ok(&response) {
         error!(
-            error = %error_message,
+            error = %e,
             file_name = %file_name,
             "Failed to get upload URL from Slack"
         );
-        return Err(Box::new(std::io::Error::other(error_message)));
+        return Err(e);
     }
 
+    let parsed = nojson::RawJson::parse(&response)?;
+    let root = parsed.value();
     let upload_url = get_required_string(root, "upload_url")?;
     let file_id = get_required_string(root, "file_id")?;
 
@@ -227,30 +232,51 @@ pub async fn send_single_file_to_slack(
         })
         .await?;
 
-    let response_text = String::from_utf8(response_text.body)
-        .map_err(|e| Box::<dyn StdError>::from(std::io::Error::other(e.to_string())))?;
-
-    let parsed = nojson::RawJson::parse(&response_text)?;
-    let root = parsed.value();
-    let ok = get_required_bool(root, "ok")?;
-
-    if ok {
-        info!(
-            file_id = %file_id,
-            file_name = %file_name,
-            channel = %channel,
-            "File successfully shared to Slack channel"
-        );
-        Ok(response_text)
-    } else {
+    let response_text = response_body_to_text(response_text.body)?;
+    if let Err(e) = ensure_slack_ok(&response_text) {
         error!(
-            error = %get_optional_string(root, "error").unwrap_or_else(|| "unknown_error".to_string()),
+            error = %e,
             file_id = %file_id,
             channel = %channel,
             "Failed to complete file upload"
         );
-        let error_message =
-            get_optional_string(root, "error").unwrap_or_else(|| "unknown_error".to_string());
-        Err(Box::new(std::io::Error::other(error_message)))
+        return Err(e);
+    }
+
+    info!(
+        file_id = %file_id,
+        file_name = %file_name,
+        channel = %channel,
+        "File successfully shared to Slack channel"
+    );
+    Ok(response_text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_slack_ok, response_body_to_text};
+
+    #[test]
+    fn response_body_to_text_rejects_non_utf8() {
+        assert!(response_body_to_text(vec![0xFF]).is_err());
+    }
+
+    #[test]
+    fn ensure_slack_ok_accepts_ok_true() {
+        assert!(ensure_slack_ok(r#"{"ok":true}"#).is_ok());
+    }
+
+    #[test]
+    fn ensure_slack_ok_rejects_ok_false_with_error() {
+        let error = ensure_slack_ok(r#"{"ok":false,"error":"channel_not_found"}"#)
+            .expect_err("Slack error should be returned");
+
+        assert_eq!(error.to_string(), "channel_not_found");
+    }
+
+    #[test]
+    fn ensure_slack_ok_rejects_missing_ok_and_invalid_json() {
+        assert!(ensure_slack_ok(r#"{"error":"missing_ok"}"#).is_err());
+        assert!(ensure_slack_ok("not json").is_err());
     }
 }

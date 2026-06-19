@@ -585,3 +585,122 @@ fn apply_s3_cors(path: &str, request: &Request, response: &mut Response) {
     response.add_header("Access-Control-Max-Age", "600");
     response.add_header("Vary", "Origin");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{S3_CORS_ALLOWED_ORIGIN, parse_preview_bucket_and_key, process_request};
+    use crate::{
+        config::{settings::Settings, state::AppState},
+        http_client::HttpClient,
+    };
+    use shiguredo_http11::Request;
+
+    fn app_state() -> AppState {
+        AppState {
+            settings: Settings {
+                slack_bot_token: "xoxb-test".to_string(),
+                slack_api_base_url: "https://slack.com/api".to_string(),
+                s3_access_key_id: "access-key".to_string(),
+                s3_secret_access_key: "secret-key".to_string(),
+                s3_region: "us-east-1".to_string(),
+                s3_endpoint: Some("http://127.0.0.1:9000".to_string()),
+                s3_use_path_style: true,
+                s3_session_token: None,
+            },
+            client: HttpClient::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_path_returns_404_problem_details() {
+        let response = process_request(Request::new("GET", "/missing"), &app_state()).await;
+
+        assert_eq!(response.status_code, 404);
+        assert_eq!(
+            response.get_header("content-type"),
+            Some("application/problem+json")
+        );
+    }
+
+    #[tokio::test]
+    async fn known_path_with_invalid_method_returns_405() {
+        let response = process_request(Request::new("POST", "/health"), &app_state()).await;
+
+        assert_eq!(response.status_code, 405);
+        assert_eq!(
+            response.get_header("content-type"),
+            Some("application/problem+json")
+        );
+    }
+
+    #[tokio::test]
+    async fn request_id_is_generated_when_missing() {
+        let response = process_request(Request::new("GET", "/health"), &app_state()).await;
+
+        assert!(response.get_header("x-request-id").is_some());
+    }
+
+    #[tokio::test]
+    async fn request_id_is_preserved_when_present() {
+        let request = Request::new("GET", "/health").header("x-request-id", "req-test");
+        let response = process_request(request, &app_state()).await;
+
+        assert_eq!(response.get_header("x-request-id"), Some("req-test"));
+    }
+
+    #[tokio::test]
+    async fn s3_preflight_is_limited_to_declared_endpoints() {
+        let response =
+            process_request(Request::new("OPTIONS", "/s3/list_objects_v2"), &app_state()).await;
+        assert_eq!(response.status_code, 204);
+        assert_eq!(
+            response.get_header("Access-Control-Allow-Origin"),
+            Some(S3_CORS_ALLOWED_ORIGIN)
+        );
+        assert_eq!(
+            response.get_header("Access-Control-Allow-Methods"),
+            Some("GET, POST, OPTIONS")
+        );
+
+        let response =
+            process_request(Request::new("OPTIONS", "/s3/head_object"), &app_state()).await;
+        assert_eq!(response.status_code, 405);
+        assert_eq!(
+            response.get_header("Access-Control-Allow-Origin"),
+            Some(S3_CORS_ALLOWED_ORIGIN)
+        );
+    }
+
+    #[tokio::test]
+    async fn s3_error_responses_include_cors() {
+        let response = process_request(Request::new("GET", "/s3/not-a-route"), &app_state()).await;
+
+        assert_eq!(response.status_code, 404);
+        assert_eq!(
+            response.get_header("Access-Control-Allow-Origin"),
+            Some(S3_CORS_ALLOWED_ORIGIN)
+        );
+        assert_eq!(
+            response.get_header("content-type"),
+            Some("application/problem+json")
+        );
+    }
+
+    #[test]
+    fn preview_path_decodes_bucket_and_key() {
+        let (bucket, key) =
+            parse_preview_bucket_and_key("/s3/preview/my%20bucket/path%2Fto%2Fa.pdf")
+                .expect("preview path should parse");
+
+        assert_eq!(bucket, "my bucket");
+        assert_eq!(key, "path/to/a.pdf");
+    }
+
+    #[test]
+    fn preview_path_rejects_missing_or_invalid_segments() {
+        assert!(parse_preview_bucket_and_key("/s3/preview/bucket").is_err());
+        assert!(parse_preview_bucket_and_key("/s3/preview//key").is_err());
+        assert!(parse_preview_bucket_and_key("/s3/preview/bucket/").is_err());
+        assert!(parse_preview_bucket_and_key("/s3/preview/bucket/%ZZ").is_err());
+    }
+}

@@ -139,6 +139,19 @@ fn get_required_string(root: nojson::RawJsonValue<'_, '_>, name: &str) -> Result
         .map_err(|e| ApiError::BadRequest(format!("Invalid '{name}': {e}")))
 }
 
+fn get_required_non_empty_string(
+    root: nojson::RawJsonValue<'_, '_>,
+    name: &str,
+) -> Result<String, ApiError> {
+    let value = get_required_string(root, name)?;
+    if value.trim().is_empty() {
+        return Err(ApiError::BadRequest(format!(
+            "Invalid '{name}': empty value"
+        )));
+    }
+    Ok(value)
+}
+
 fn get_optional_string(
     root: nojson::RawJsonValue<'_, '_>,
     name: &str,
@@ -225,8 +238,8 @@ fn parse_put_object_base64_request(body: &str) -> Result<PutObjectBase64Request,
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(PutObjectBase64Request {
-        bucket: get_required_string(root, "bucket")?,
-        key: get_required_string(root, "key")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
+        key: get_required_non_empty_string(root, "key")?,
         file_data_base64: get_required_string(root, "file_data_base64")?,
         content_type: get_optional_string(root, "content_type")?,
     })
@@ -236,8 +249,8 @@ fn parse_get_object_request(body: &str) -> Result<GetObjectRequest, ApiError> {
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(GetObjectRequest {
-        bucket: get_required_string(root, "bucket")?,
-        key: get_required_string(root, "key")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
+        key: get_required_non_empty_string(root, "key")?,
     })
 }
 
@@ -245,8 +258,8 @@ fn parse_head_object_request(body: &str) -> Result<HeadObjectRequest, ApiError> 
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(HeadObjectRequest {
-        bucket: get_required_string(root, "bucket")?,
-        key: get_required_string(root, "key")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
+        key: get_required_non_empty_string(root, "key")?,
     })
 }
 
@@ -254,8 +267,8 @@ fn parse_delete_object_request(body: &str) -> Result<DeleteObjectRequest, ApiErr
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(DeleteObjectRequest {
-        bucket: get_required_string(root, "bucket")?,
-        key: get_required_string(root, "key")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
+        key: get_required_non_empty_string(root, "key")?,
     })
 }
 
@@ -274,13 +287,13 @@ fn parse_delete_objects_request(body: &str) -> Result<DeleteObjectsRequest, ApiE
         .map_err(|e| ApiError::BadRequest(format!("Invalid 'objects': {e}")))?
     {
         objects.push(DeleteObjectIdentifierRequest {
-            key: get_required_string(object, "key")?,
+            key: get_required_non_empty_string(object, "key")?,
             version_id: get_optional_string(object, "version_id")?,
         });
     }
 
     Ok(DeleteObjectsRequest {
-        bucket: get_required_string(root, "bucket")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
         objects,
         quiet: get_optional_bool(root, "quiet")?,
     })
@@ -290,7 +303,7 @@ fn parse_list_objects_v2_request(body: &str) -> Result<ListObjectsV2Request, Api
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(ListObjectsV2Request {
-        bucket: get_required_string(root, "bucket")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
         prefix: get_optional_string(root, "prefix")?,
         delimiter: get_optional_string(root, "delimiter")?,
         max_keys: get_optional_i32(root, "max_keys")?,
@@ -304,8 +317,8 @@ fn parse_create_multipart_upload_request(
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(CreateMultipartUploadRequest {
-        bucket: get_required_string(root, "bucket")?,
-        key: get_required_string(root, "key")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
+        key: get_required_non_empty_string(root, "key")?,
         content_type: get_optional_string(root, "content_type")?,
     })
 }
@@ -314,10 +327,10 @@ fn parse_upload_part_base64_request(body: &str) -> Result<UploadPartBase64Reques
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(UploadPartBase64Request {
-        bucket: get_required_string(root, "bucket")?,
-        key: get_required_string(root, "key")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
+        key: get_required_non_empty_string(root, "key")?,
         upload_id: get_required_string(root, "upload_id")?,
-        part_number: get_required_i32(root, "part_number")?,
+        part_number: get_required_part_number(root, "part_number")?,
         part_data_base64: get_required_string(root, "part_data_base64")?,
     })
 }
@@ -329,6 +342,19 @@ fn get_required_i32(root: nojson::RawJsonValue<'_, '_>, name: &str) -> Result<i3
         .map_err(|e| ApiError::BadRequest(e.to_string()))?
         .try_into()
         .map_err(|e| ApiError::BadRequest(format!("Invalid '{name}': {e}")))
+}
+
+fn get_required_part_number(
+    root: nojson::RawJsonValue<'_, '_>,
+    name: &str,
+) -> Result<i32, ApiError> {
+    let value = get_required_i32(root, name)?;
+    if !(1..=10_000).contains(&value) {
+        return Err(ApiError::BadRequest(format!(
+            "Invalid '{name}': must be between 1 and 10000"
+        )));
+    }
+    Ok(value)
 }
 
 fn parse_complete_multipart_upload_request(
@@ -348,14 +374,14 @@ fn parse_complete_multipart_upload_request(
         .map_err(|e| ApiError::BadRequest(format!("Invalid 'parts': {e}")))?
     {
         parts.push(CompletePartRequest {
-            part_number: get_required_i32(part, "part_number")?,
+            part_number: get_required_part_number(part, "part_number")?,
             e_tag: get_required_string(part, "e_tag")?,
         });
     }
 
     Ok(CompleteMultipartUploadRequest {
-        bucket: get_required_string(root, "bucket")?,
-        key: get_required_string(root, "key")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
+        key: get_required_non_empty_string(root, "key")?,
         upload_id: get_required_string(root, "upload_id")?,
         parts,
     })
@@ -367,8 +393,8 @@ fn parse_abort_multipart_upload_request(
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(AbortMultipartUploadRequest {
-        bucket: get_required_string(root, "bucket")?,
-        key: get_required_string(root, "key")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
+        key: get_required_non_empty_string(root, "key")?,
         upload_id: get_required_string(root, "upload_id")?,
     })
 }
@@ -377,8 +403,8 @@ fn parse_list_parts_request(body: &str) -> Result<ListPartsRequest, ApiError> {
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(ListPartsRequest {
-        bucket: get_required_string(root, "bucket")?,
-        key: get_required_string(root, "key")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
+        key: get_required_non_empty_string(root, "key")?,
         upload_id: get_required_string(root, "upload_id")?,
         max_parts: get_optional_i32(root, "max_parts")?,
         part_number_marker: get_optional_i32(root, "part_number_marker")?,
@@ -391,7 +417,7 @@ fn parse_list_multipart_uploads_request(
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(ListMultipartUploadsRequest {
-        bucket: get_required_string(root, "bucket")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
         prefix: get_optional_string(root, "prefix")?,
         delimiter: get_optional_string(root, "delimiter")?,
         max_uploads: get_optional_i32(root, "max_uploads")?,
@@ -404,8 +430,8 @@ fn parse_presigned_object_request(body: &str) -> Result<PresignedObjectRequest, 
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(PresignedObjectRequest {
-        bucket: get_required_string(root, "bucket")?,
-        key: get_required_string(root, "key")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
+        key: get_required_non_empty_string(root, "key")?,
         expires_in_secs: get_optional_u64(root, "expires_in_secs")?,
     })
 }
@@ -414,7 +440,7 @@ fn parse_bucket_request(body: &str) -> Result<BucketRequest, ApiError> {
     let json = parse_json_body(body)?;
     let root = json.value();
     Ok(BucketRequest {
-        bucket: get_required_string(root, "bucket")?,
+        bucket: get_required_non_empty_string(root, "bucket")?,
     })
 }
 
@@ -926,8 +952,9 @@ pub fn s3_preflight() -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_forward_header, parse_delete_objects_request, parse_list_objects_v2_request,
-        parse_presigned_object_request,
+        extract_forward_header, parse_complete_multipart_upload_request,
+        parse_delete_objects_request, parse_get_object_request, parse_list_objects_v2_request,
+        parse_presigned_object_request, parse_upload_part_base64_request,
     };
     use proptest::{prelude::ProptestConfig, prop_assert_eq, proptest};
 
@@ -985,6 +1012,57 @@ mod tests {
         assert_eq!(parsed.bucket, "pdfs");
         assert_eq!(parsed.key, "20260418/a.pdf");
         assert_eq!(parsed.expires_in_secs, None);
+    }
+
+    #[test]
+    fn parse_get_object_rejects_missing_type_mismatch_and_empty_values() {
+        assert!(parse_get_object_request(r#"{"key":"a.pdf"}"#).is_err());
+        assert!(parse_get_object_request(r#"{"bucket":123,"key":"a.pdf"}"#).is_err());
+        assert!(parse_get_object_request(r#"{"bucket":"","key":"a.pdf"}"#).is_err());
+        assert!(parse_get_object_request(r#"{"bucket":"pdfs","key":"   "}"#).is_err());
+    }
+
+    #[test]
+    fn parse_delete_objects_rejects_empty_object_key() {
+        let body = r#"{
+            "bucket": "pdfs",
+            "objects": [{"key": ""}]
+        }"#;
+
+        assert!(parse_delete_objects_request(body).is_err());
+    }
+
+    #[test]
+    fn parse_upload_part_rejects_invalid_part_number() {
+        let body = r#"{
+            "bucket": "pdfs",
+            "key": "large.bin",
+            "upload_id": "upload-1",
+            "part_number": 0,
+            "part_data_base64": "YQ=="
+        }"#;
+        assert!(parse_upload_part_base64_request(body).is_err());
+
+        let body = r#"{
+            "bucket": "pdfs",
+            "key": "large.bin",
+            "upload_id": "upload-1",
+            "part_number": 10001,
+            "part_data_base64": "YQ=="
+        }"#;
+        assert!(parse_upload_part_base64_request(body).is_err());
+    }
+
+    #[test]
+    fn parse_complete_multipart_upload_rejects_invalid_part_number() {
+        let body = r#"{
+            "bucket": "pdfs",
+            "key": "large.bin",
+            "upload_id": "upload-1",
+            "parts": [{"part_number": 0, "e_tag": "\"etag\""}]
+        }"#;
+
+        assert!(parse_complete_multipart_upload_request(body).is_err());
     }
 
     proptest! {

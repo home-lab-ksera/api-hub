@@ -231,7 +231,7 @@ pub async fn upload_image_raw(
     body: &[u8],
 ) -> Result<Response, ApiError> {
     let payload = parse_upload_query(raw_query)?;
-    let content_type = content_type(&headers)?;
+    let content_type = content_type(headers)?;
     validate_file_not_empty(body)?;
     let extension = ensure_image_content(&content_type, body)?;
     let file_name = payload
@@ -287,7 +287,7 @@ pub async fn upload_pdf_raw(
     body: &[u8],
 ) -> Result<Response, ApiError> {
     let payload = parse_upload_query(raw_query)?;
-    let content_type = content_type(&headers)?;
+    let content_type = content_type(headers)?;
     validate_file_not_empty(body)?;
 
     if content_type != "application/pdf" {
@@ -345,4 +345,93 @@ pub async fn upload_pdf_raw(
     );
 
     Ok(json_string_response(response_text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        content_type, ensure_image_content, looks_like_pdf, parse_message_request,
+        parse_upload_query, validate_file_not_empty,
+    };
+
+    #[test]
+    fn parse_upload_query_decodes_plus_and_percent_encoding() {
+        let parsed = parse_upload_query(Some("channel=C123%2Fdev+ops&file_name=hello%20world.png"))
+            .expect("query should parse");
+
+        assert_eq!(parsed.channel, "C123/dev ops");
+        assert_eq!(parsed.file_name.as_deref(), Some("hello world.png"));
+    }
+
+    #[test]
+    fn parse_upload_query_rejects_empty_channel() {
+        assert!(parse_upload_query(Some("channel=+&file_name=hello.png")).is_err());
+    }
+
+    #[test]
+    fn parse_upload_query_treats_empty_file_name_as_absent() {
+        let parsed =
+            parse_upload_query(Some("channel=C123&file_name=+")).expect("query should parse");
+
+        assert_eq!(parsed.channel, "C123");
+        assert_eq!(parsed.file_name, None);
+    }
+
+    #[test]
+    fn parse_message_request_rejects_invalid_json_and_missing_fields() {
+        assert!(parse_message_request("").is_err());
+        assert!(parse_message_request(r#"{"channel":"C123"}"#).is_err());
+        assert!(parse_message_request(r#"{"channel":1,"text":"hello"}"#).is_err());
+    }
+
+    #[test]
+    fn content_type_requires_header_and_normalizes_parameters() {
+        assert!(content_type(&[]).is_err());
+        let headers = vec![(
+            "Content-Type".to_string(),
+            "Image/PNG; charset=binary".to_string(),
+        )];
+
+        assert_eq!(content_type(&headers).expect("content type"), "image/png");
+    }
+
+    #[test]
+    fn validate_file_not_empty_rejects_empty_body() {
+        assert!(validate_file_not_empty(b"").is_err());
+        assert!(validate_file_not_empty(b"x").is_ok());
+    }
+
+    #[test]
+    fn ensure_image_content_accepts_supported_magic_bytes() {
+        assert_eq!(
+            ensure_image_content("image/png", b"\x89PNG\r\n\x1A\nrest").expect("png"),
+            "png"
+        );
+        assert_eq!(
+            ensure_image_content("image/jpeg", b"\xFF\xD8\xFFrest").expect("jpeg"),
+            "jpg"
+        );
+        assert_eq!(
+            ensure_image_content("image/gif", b"GIF89arest").expect("gif"),
+            "gif"
+        );
+        assert_eq!(
+            ensure_image_content("image/webp", b"RIFFxxxxWEBPrest").expect("webp"),
+            "webp"
+        );
+    }
+
+    #[test]
+    fn ensure_image_content_rejects_content_type_mismatch() {
+        assert!(ensure_image_content("image/png", b"\xFF\xD8\xFFrest").is_err());
+        assert!(
+            ensure_image_content("application/octet-stream", b"\x89PNG\r\n\x1A\nrest").is_err()
+        );
+    }
+
+    #[test]
+    fn pdf_signature_is_checked() {
+        assert!(looks_like_pdf(b"%PDF-1.7\n"));
+        assert!(!looks_like_pdf(b"not pdf"));
+    }
 }

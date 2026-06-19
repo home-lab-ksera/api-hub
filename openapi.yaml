@@ -281,6 +281,22 @@ paths:
       responses:
         '204':
           description: No Content
+          headers:
+            Access-Control-Allow-Origin:
+              schema:
+                type: string
+            Access-Control-Allow-Methods:
+              schema:
+                type: string
+              example: GET, POST, OPTIONS
+            Access-Control-Allow-Headers:
+              schema:
+                type: string
+              example: content-type, x-request-id
+            Access-Control-Max-Age:
+              schema:
+                type: string
+              example: '600'
 
   /s3/create_multipart_upload:
     post:
@@ -431,6 +447,22 @@ paths:
       responses:
         '204':
           description: No Content
+          headers:
+            Access-Control-Allow-Origin:
+              schema:
+                type: string
+            Access-Control-Allow-Methods:
+              schema:
+                type: string
+              example: GET, POST, OPTIONS
+            Access-Control-Allow-Headers:
+              schema:
+                type: string
+              example: content-type, x-request-id
+            Access-Control-Max-Age:
+              schema:
+                type: string
+              example: '600'
 
   /s3/presigned_put_object:
     post:

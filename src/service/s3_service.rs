@@ -184,7 +184,7 @@ pub async fn get_object(
         f.object(|f| {
             f.member("file_data_base64", BASE64_STANDARD.encode(&output.body))?;
             f.member("content_type", &output.content_type)?;
-            f.member("content_length", &output.content_length)?;
+            f.member("content_length", output.content_length)?;
             f.member("e_tag", &output.e_tag)?;
             f.member("last_modified", &output.last_modified)?;
             f.member("version_id", &output.version_id)?;
@@ -269,7 +269,7 @@ pub async fn head_object(
     Ok(nojson::json(|f| {
         f.object(|f| {
             f.member("content_type", &output.content_type)?;
-            f.member("content_length", &output.content_length)?;
+            f.member("content_length", output.content_length)?;
             f.member("e_tag", &output.e_tag)?;
             f.member("last_modified", &output.last_modified)?;
             f.member("version_id", &output.version_id)?;
@@ -297,7 +297,7 @@ pub async fn delete_object(
 
     Ok(nojson::json(|f| {
         f.object(|f| {
-            f.member("delete_marker", &output.delete_marker)?;
+            f.member("delete_marker", output.delete_marker)?;
             f.member("version_id", &output.version_id)
         })
     })
@@ -337,7 +337,7 @@ pub async fn delete_objects(
                         f.element(nojson::object(|f| {
                             f.member("key", &deleted.key)?;
                             f.member("version_id", &deleted.version_id)?;
-                            f.member("delete_marker", &deleted.delete_marker)?;
+                            f.member("delete_marker", deleted.delete_marker)?;
                             f.member(
                                 "delete_marker_version_id",
                                 &deleted.delete_marker_version_id,
@@ -397,12 +397,12 @@ pub async fn list_objects_v2(
 
     Ok(nojson::json(|f| {
         f.object(|f| {
-            f.member("is_truncated", &output.is_truncated)?;
+            f.member("is_truncated", output.is_truncated)?;
             f.member("name", &output.name)?;
             f.member("prefix", &output.prefix)?;
             f.member("delimiter", &output.delimiter)?;
-            f.member("max_keys", &output.max_keys)?;
-            f.member("key_count", &output.key_count)?;
+            f.member("max_keys", output.max_keys)?;
+            f.member("key_count", output.key_count)?;
             f.member("continuation_token", &output.continuation_token)?;
             f.member("next_continuation_token", &output.next_continuation_token)?;
             f.member("start_after", &output.start_after)?;
@@ -582,10 +582,10 @@ pub async fn list_parts(
             f.member("bucket", &output.bucket)?;
             f.member("key", &output.key)?;
             f.member("upload_id", &output.upload_id)?;
-            f.member("part_number_marker", &output.part_number_marker)?;
-            f.member("next_part_number_marker", &output.next_part_number_marker)?;
-            f.member("max_parts", &output.max_parts)?;
-            f.member("is_truncated", &output.is_truncated)?;
+            f.member("part_number_marker", output.part_number_marker)?;
+            f.member("next_part_number_marker", output.next_part_number_marker)?;
+            f.member("max_parts", output.max_parts)?;
+            f.member("is_truncated", output.is_truncated)?;
             f.member("storage_class", &output.storage_class)?;
             f.member(
                 "parts",
@@ -647,8 +647,8 @@ pub async fn list_multipart_uploads(
             f.member("next_upload_id_marker", &output.next_upload_id_marker)?;
             f.member("prefix", &output.prefix)?;
             f.member("delimiter", &output.delimiter)?;
-            f.member("max_uploads", &output.max_uploads)?;
-            f.member("is_truncated", &output.is_truncated)?;
+            f.member("max_uploads", output.max_uploads)?;
+            f.member("is_truncated", output.is_truncated)?;
             f.member(
                 "uploads",
                 nojson::array(|f| {

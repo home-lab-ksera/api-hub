@@ -22,6 +22,7 @@ OpenAPI definition: `openapi.yaml`
   - body: `{ "bucket": "b", "key": "path/a.txt", "file_data_base64": "...", "content_type": "text/plain" }`
 - `GET /s3/preview/{bucket}/{*key}`
   - body: なし（S3オブジェクトをプロキシ配信）
+  - `{bucket}` と `{*key}` は percent decode されます。不正な percent encoding、空 bucket/key は `400` です。
 - `POST /s3/get_object_base64`
   - body: `{ "bucket": "b", "key": "path/a.txt" }`
 - `POST /s3/head_object`
@@ -70,6 +71,8 @@ OpenAPI definition: `openapi.yaml`
 }
 ```
 
+S3系エンドポイントのレスポンスには、エラー時も含めて CORS ヘッダーを付与します。`OPTIONS` は `POST /s3/list_objects_v2` と `POST /s3/presigned_get_object` の preflight のみ対応し、`Access-Control-Allow-Methods: GET, POST, OPTIONS` と `Access-Control-Allow-Headers: content-type, x-request-id` を返します。
+
 ## 環境変数
 
 - `SLACK_BOT_TOKEN` (必須)
@@ -79,9 +82,13 @@ OpenAPI definition: `openapi.yaml`
 - `RUSTFS_S3_REGION` (任意, デフォルト: `us-east-1`)
 - `RUSTFS_S3_ENDPOINT` (任意, 例: `http://rustfs.example.local:9000`)
 - `RUSTFS_S3_USE_PATH_STYLE` (任意, デフォルト: `true`)
+  - true 扱い: `1`, `true`, `yes`, `on` (大文字小文字は区別しません)
+  - 未設定時は `true`、それ以外の値は `false` 扱いです。
 - `RUSTFS_S3_SESSION_TOKEN` (任意)
 
 ## 起動
+
+サーバは現在 `0.0.0.0:3000` に固定で bind します。
 
 ```bash
 cargo run --bin api-hub
@@ -90,9 +97,11 @@ cargo run --bin api-hub
 ## テスト
 
 ```bash
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
 ## CI
 
-GitHub Actionsで `cargo test --all-targets` を実行します。
+GitHub Actionsで `cargo fmt --all --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test --all-targets`、Docker build を実行します。

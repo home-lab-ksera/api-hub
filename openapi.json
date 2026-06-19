@@ -430,7 +430,32 @@
         "summary": "CORS preflight for list objects",
         "responses": {
           "204": {
-            "description": "No Content"
+            "description": "No Content",
+            "headers": {
+              "Access-Control-Allow-Origin": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Access-Control-Allow-Methods": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "GET, POST, OPTIONS"
+              },
+              "Access-Control-Allow-Headers": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "content-type, x-request-id"
+              },
+              "Access-Control-Max-Age": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "600"
+              }
+            }
           }
         }
       }
@@ -664,7 +689,32 @@
         "summary": "CORS preflight for presigned GET URL",
         "responses": {
           "204": {
-            "description": "No Content"
+            "description": "No Content",
+            "headers": {
+              "Access-Control-Allow-Origin": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Access-Control-Allow-Methods": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "GET, POST, OPTIONS"
+              },
+              "Access-Control-Allow-Headers": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "content-type, x-request-id"
+              },
+              "Access-Control-Max-Age": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "600"
+              }
+            }
           }
         }
       }
