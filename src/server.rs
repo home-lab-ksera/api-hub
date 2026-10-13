@@ -3,7 +3,7 @@ use crate::errors::api_error::{ApiError, reason_phrase};
 use crate::handlers::{health_handler, openapi_handler, s3_handler, slack_handler};
 use crate::request_id;
 use shiguredo_http11::uri::percent_decode;
-use shiguredo_http11::{Request, RequestDecoder, Response};
+use shiguredo_http11::{DecoderLimits, Request, RequestDecoder, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{Instrument, debug, error, info, info_span, warn};
@@ -11,7 +11,7 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 const S3_CORS_ALLOWED_ORIGIN: &str = "https://hitomi-upload-viewer.internal.qroksera.com";
 
 pub async fn handle_connection(mut stream: TcpStream, app_state: AppState) {
-    let mut decoder = RequestDecoder::new();
+    let mut decoder = request_decoder();
     let mut buffer = vec![0_u8; 8192];
 
     loop {
@@ -73,6 +73,15 @@ pub async fn handle_connection(mut stream: TcpStream, app_state: AppState) {
             return;
         }
     }
+}
+
+fn request_decoder() -> RequestDecoder {
+    // Accept uploads of any size, retaining the HTTP header and framing limits.
+    RequestDecoder::with_limits(DecoderLimits {
+        max_body_size: usize::MAX,
+        max_buffer_size: usize::MAX,
+        ..DecoderLimits::default()
+    })
 }
 
 async fn write_response(stream: &mut TcpStream, response: Response) -> std::io::Result<()> {
@@ -584,4 +593,36 @@ fn apply_s3_cors(path: &str, request: &Request, response: &mut Response) {
     response.add_header("Access-Control-Allow-Headers", "content-type, x-request-id");
     response.add_header("Access-Control-Max-Age", "600");
     response.add_header("Vary", "Origin");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_decoder;
+
+    #[test]
+    fn accepts_uploads_larger_than_default_limit() {
+        let body = vec![b'a'; 11 * 1024 * 1024];
+        for chunked in [false, true] {
+            let mut decoder = request_decoder();
+            let mut encoded = if chunked {
+                format!(
+                    "POST /s3/upload_part_base64 HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+                    body.len()
+                ).into_bytes()
+            } else {
+                format!(
+                    "POST /s3/put_object_base64 HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                ).into_bytes()
+            };
+            encoded.extend_from_slice(&body);
+            if chunked {
+                encoded.extend_from_slice(b"\r\n0\r\n\r\n");
+            }
+            // A large feed also verifies that the receive buffer has no size cap.
+            decoder.feed(&encoded).unwrap();
+            let request = decoder.decode().unwrap().unwrap();
+            assert_eq!(request.body, body);
+        }
+    }
 }
