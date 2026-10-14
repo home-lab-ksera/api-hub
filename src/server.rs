@@ -3,7 +3,7 @@ use crate::errors::api_error::{ApiError, reason_phrase};
 use crate::handlers::{health_handler, openapi_handler, s3_handler, slack_handler};
 use crate::request_id;
 use shiguredo_http11::uri::percent_decode;
-use shiguredo_http11::{DecoderLimits, Request, RequestDecoder, Response};
+use shiguredo_http11::{BodyProgress, DecoderLimits, Request, RequestDecoder, Response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{Instrument, debug, error, info, info_span, warn};
@@ -16,8 +16,16 @@ pub async fn handle_connection(mut stream: TcpStream, app_state: AppState) {
 
     loop {
         let request = loop {
-            match decoder.decode() {
-                Ok(Some(request)) => break request,
+            match decoder.decode_headers() {
+                Ok(Some((head, _))) => {
+                    break Request {
+                        method: head.method,
+                        uri: head.uri,
+                        version: head.version,
+                        headers: head.headers,
+                        body: Vec::new(),
+                    };
+                }
                 Ok(None) => {
                     let n = match stream.read(&mut buffer).await {
                         Ok(n) => n,
@@ -47,6 +55,46 @@ pub async fn handle_connection(mut stream: TcpStream, app_state: AppState) {
 
         let keep_alive = request.is_keep_alive();
 
+        if request.method == "POST" && split_uri(&request.uri).0 == "/s3/put_object_stream" {
+            let request_id = request
+                .get_header("x-request-id")
+                .map(str::to_owned)
+                .unwrap_or_else(request_id::generate_request_id);
+            let start = std::time::Instant::now();
+            let result =
+                crate::s3_upload::upload(&mut stream, &mut decoder, &request, &app_state).await;
+            let failed = result.is_err();
+            if let Err(error) = &result {
+                warn!(%error, request_id = %request_id, "Streaming upload failed");
+            }
+            let mut response = result.unwrap_or_else(ApiError::into_response);
+            apply_problem_details(&mut response);
+            apply_s3_cors("/s3/put_object_stream", &request, &mut response);
+            response.add_header("x-request-id", &request_id);
+            info!(operation = "s3_stream_upload", status = response.status_code,
+                latency_ms = start.elapsed().as_millis() as u64, request_id = %request_id);
+            // On errors the request body may not have been consumed.
+            if failed || !keep_alive {
+                response.add_header("Connection", "close");
+            }
+            if write_response(&mut stream, response).await.is_err() || failed || !keep_alive {
+                return;
+            }
+            continue;
+        }
+
+        let mut request = request;
+        loop {
+            match read_body_chunk(&mut stream, &mut decoder).await {
+                Ok(Some(chunk)) => request.body.extend_from_slice(&chunk),
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = write_response(&mut stream, error.into_response()).await;
+                    return;
+                }
+            }
+        }
+
         if is_preview_get(&request) {
             if write_preview_stream_response(&mut stream, request, &app_state, keep_alive)
                 .await
@@ -72,6 +120,47 @@ pub async fn handle_connection(mut stream: TcpStream, app_state: AppState) {
         if !keep_alive {
             return;
         }
+    }
+}
+
+pub(crate) async fn read_body_chunk(
+    stream: &mut TcpStream,
+    decoder: &mut RequestDecoder,
+) -> Result<Option<Vec<u8>>, ApiError> {
+    loop {
+        if let Some(data) = decoder.peek_body().filter(|data| !data.is_empty()) {
+            let chunk = data.to_vec();
+            decoder
+                .consume_body(chunk.len())
+                .map_err(|e| ApiError::BadRequest(format!("Invalid HTTP body: {e}")))?;
+            return Ok(Some(chunk));
+        }
+        let buffered_before = decoder.remaining().len();
+        if matches!(
+            decoder
+                .progress()
+                .map_err(|e| ApiError::BadRequest(format!("Invalid HTTP body: {e}")))?,
+            BodyProgress::Complete { .. }
+        ) {
+            return Ok(None);
+        }
+        // progress() may have exposed chunk data already buffered by the decoder.
+        if decoder.remaining().len() != buffered_before
+            || decoder.peek_body().is_some_and(|data| !data.is_empty())
+        {
+            continue;
+        }
+        let mut buffer = [0; 8192];
+        let n = stream
+            .read(&mut buffer)
+            .await
+            .map_err(|e| ApiError::BadRequest(format!("Failed to read HTTP body: {e}")))?;
+        if n == 0 {
+            return Err(ApiError::BadRequest("Incomplete HTTP body".into()));
+        }
+        decoder
+            .feed(&buffer[..n])
+            .map_err(|e| ApiError::BadRequest(format!("Invalid HTTP body: {e}")))?;
     }
 }
 
@@ -506,7 +595,9 @@ async fn route_request(
         ("POST", "/s3/delete_bucket") => {
             return s3_handler::delete_bucket(app_state, &request.body).await;
         }
-        ("OPTIONS", "/s3/list_objects_v2") | ("OPTIONS", "/s3/presigned_get_object") => {
+        ("OPTIONS", "/s3/list_objects_v2")
+        | ("OPTIONS", "/s3/presigned_get_object")
+        | ("OPTIONS", "/s3/put_object_stream") => {
             return Ok(s3_handler::s3_preflight());
         }
         _ => {}
@@ -539,6 +630,7 @@ fn is_known_path(path: &str) -> bool {
             | "/slack/upload/image"
             | "/slack/upload/pdf"
             | "/s3/put_object_base64"
+            | "/s3/put_object_stream"
             | "/s3/get_object_base64"
             | "/s3/head_object"
             | "/s3/delete_object"

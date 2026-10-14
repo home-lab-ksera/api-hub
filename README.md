@@ -20,6 +20,12 @@ OpenAPI definition: `openapi.yaml`
   - body: PDFバイナリ
 - `POST /s3/put_object_base64`
   - body: `{ "bucket": "b", "key": "path/a.txt", "file_data_base64": "...", "content_type": "text/plain" }`
+- `POST /s3/put_object_stream?bucket=b&key=path%2Fvideo.mp4`
+  - header: `Content-Type: video/mp4`（省略時は `application/octet-stream`）
+  - body: バイナリ。Content-Length / chunked に対応。
+  - 最大8 MiBずつ受信してS3へ順次転送。8 MiB以上は multipart upload を使用し、切断・転送エラー時は abort を試行します。
+  - response: `{ "e_tag": "...", "version_id": null }`
+  - 1リクエストあたり最大10,000パート（約78 GiB）。プロセス強制終了などで abort できない場合に備え、ストレージ側の未完了 multipart upload の削除ポリシーを推奨します。
 - `GET /s3/preview/{bucket}/{*key}`
   - body: なし（S3オブジェクトをプロキシ配信）
 - `POST /s3/get_object_base64`
@@ -56,6 +62,17 @@ OpenAPI definition: `openapi.yaml`
   - body: `{ "bucket": "b" }`
 - `POST /s3/delete_bucket`
   - body: `{ "bucket": "b" }`
+
+## ストリーミングアップロード
+
+ストリーミングアップロード例（query の bucket / key は URL エンコードしてください）:
+
+```bash
+curl --fail-with-body 'http://localhost:3000/s3/put_object_stream?bucket=b&key=path%2Fvideo.mp4' \
+  -H 'Content-Type: video/mp4' --data-binary @video.mp4
+```
+
+リバースプロキシを経由する場合は、このパスのリクエストボディのバッファリングを無効化し、サイズ制限とタイムアウトも動画サイズに合わせて設定してください。
 
 ## Error response (RFC9457)
 

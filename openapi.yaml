@@ -7,6 +7,49 @@ info:
 servers:
   - url: http://localhost:3000
 paths:
+  /s3/put_object_stream:
+    post:
+      operationId: putObjectStream
+      summary: Stream a binary object to S3 with bounded memory
+      description: |
+        Accepts Content-Length or chunked bodies. Buffers at most 8 MiB of payload
+        per part and uploads sequentially using S3 multipart upload for large objects.
+        Aborts the multipart upload on receive or S3 errors. Maximum 10000 parts.
+        Content-Type is preserved, defaulting to application/octet-stream.
+      parameters:
+        - name: bucket
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - name: key
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          '*/*':
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Object uploaded successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  e_tag:
+                    type: [string, 'null']
+                  version_id:
+                    type: [string, 'null']
+        default:
+          $ref: '#/components/responses/ProblemDetails'
   /health:
     get:
       operationId: health
