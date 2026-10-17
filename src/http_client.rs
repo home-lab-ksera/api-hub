@@ -39,6 +39,7 @@ pub struct HttpResponseStream {
     reusable: bool,
     decoder: ResponseDecoder,
     finished: bool,
+    direct_remaining: Option<usize>,
 }
 
 impl HttpResponseStream {
@@ -68,6 +69,44 @@ impl HttpResponseStream {
         }
         if self.finished {
             return Ok(0);
+        }
+
+        // For fixed-length streaming bodies, drain bytes read with the headers
+        // first, then read straight into the caller's buffer. No decoder staging
+        // copy is needed, and the exact length keeps the pooled socket aligned.
+        if let Some(remaining) = self.direct_remaining {
+            if remaining == 0 {
+                self.finish();
+                return Ok(0);
+            }
+            let limit = remaining.min(output.len());
+            let count = if let Some(data) = self.decoder.peek_body()
+                && !data.is_empty()
+            {
+                let count = data.len().min(limit);
+                output[..count].copy_from_slice(&data[..count]);
+                self.decoder
+                    .consume_body(count)
+                    .map_err(|e| HttpClientError::Decode(e.to_string()))?;
+                count
+            } else {
+                self.stream
+                    .as_mut()
+                    .expect("unfinished response has a connection")
+                    .read(&mut output[..limit])
+                    .await
+                    .map_err(|e| HttpClientError::Io(e.to_string()))?
+            };
+            if count == 0 {
+                return Err(HttpClientError::Decode(
+                    "Connection closed before a complete response was received".into(),
+                ));
+            }
+            self.direct_remaining = Some(remaining - count);
+            if count == remaining {
+                self.finish();
+            }
+            return Ok(count);
         }
 
         let mut read_buffer = [0_u8; 8192];
@@ -384,6 +423,15 @@ impl HttpClient {
                         reusable,
                         decoder,
                         finished: false,
+                        // Buffered send() retains the decoder's existing size limits.
+                        direct_remaining: match body_kind {
+                            BodyKind::ContentLength(length)
+                                if limits.max_body_size == usize::MAX =>
+                            {
+                                Some(length)
+                            }
+                            _ => None,
+                        },
                     });
                 }
                 Err((_, false)) if retry => {
@@ -539,6 +587,70 @@ mod tests {
         }
         assert!(pool.take(&origin).is_none());
         assert!(pool.idle.is_empty());
+    }
+
+    fn fixed_length_stream(
+        length: usize,
+        stream: impl AsyncReadWrite + 'static,
+    ) -> HttpResponseStream {
+        let mut decoder = ResponseDecoder::with_limits(DecoderLimits::unlimited());
+        decoder
+            .feed(format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n").as_bytes())
+            .unwrap();
+        let (head, _) = decoder.decode_headers().unwrap().unwrap();
+        HttpResponseStream {
+            status_code: head.status_code,
+            headers: head.headers,
+            stream: Some(Box::new(stream)),
+            pool: Arc::new(Mutex::new(ConnectionPool::default())),
+            origin: Origin {
+                scheme: "http".into(),
+                host: "test".into(),
+                port: 80,
+            },
+            reusable: true,
+            decoder,
+            finished: false,
+            direct_remaining: Some(length),
+        }
+    }
+
+    #[tokio::test]
+    async fn fixed_length_stream_reads_large_buffers_without_overreading() {
+        let (client, mut server) = tokio::io::duplex(128 * 1024);
+        let payload = vec![42; 64 * 1024];
+        server.write_all(&payload).await.unwrap();
+        server.write_all(b"next").await.unwrap();
+        let mut response = fixed_length_stream(payload.len(), client);
+        let mut output = vec![0; 128 * 1024];
+        // One read can transfer 64 KiB instead of being capped at 8 KiB.
+        assert_eq!(
+            response.read_chunk(&mut output).await.unwrap(),
+            payload.len()
+        );
+        assert_eq!(&output[..payload.len()], payload);
+        assert_eq!(response.read_chunk(&mut output).await.unwrap(), 0);
+        let mut socket = response
+            .pool
+            .lock()
+            .unwrap()
+            .take(&response.origin)
+            .unwrap();
+        let mut remaining = [0; 4];
+        socket.read_exact(&mut remaining).await.unwrap();
+        assert_eq!(&remaining, b"next");
+    }
+
+    #[tokio::test]
+    async fn fixed_length_stream_rejects_truncation_without_pooling() {
+        let (client, mut server) = tokio::io::duplex(64);
+        server.write_all(b"short").await.unwrap();
+        drop(server);
+        let mut response = fixed_length_stream(100, client);
+        let mut buffer = [0; 128];
+        assert_eq!(response.read_chunk(&mut buffer).await.unwrap(), 5);
+        assert!(response.read_chunk(&mut buffer).await.is_err());
+        assert!(response.pool.lock().unwrap().idle.is_empty());
     }
 
     #[tokio::test]

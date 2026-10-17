@@ -27,7 +27,8 @@ OpenAPI definition: `openapi.yaml`
   - response: `{ "e_tag": "...", "version_id": null }`
   - 1リクエストあたり最大10,000パート（約78 GiB）。プロセス強制終了などで abort できない場合に備え、ストレージ側の未完了 multipart upload の削除ポリシーを推奨します。
 - `GET /s3/preview/{bucket}/{*key}`
-  - body: なし（S3オブジェクトをプロキシ配信）
+  - body: なし（S3オブジェクトをストリーミング配信）。バイナリのダウンロードにはBase64 APIよりこちらを推奨。
+  - Range・条件付きGETに対応。Content-Lengthがある応答は最大64 KiBずつ転送用バッファへ直接読み込み、ファイル全体の取得完了を待たずに配信します。
 - `POST /s3/get_object_base64`
   - body: `{ "bucket": "b", "key": "path/a.txt" }`
 - `POST /s3/head_object`
@@ -112,6 +113,10 @@ cargo run --bin api-hub
 
 再利用した接続で応答受信前に通信エラーが発生した場合、GET・HEADのみ新しい接続で1回再試行します。
 アップロードなどの更新操作は自動再送しません。HEADはContent-Lengthの値にかかわらず、本文を待たずに処理します。
+
+ダウンロードでは `s3::download` ログに `upstream_headers_ms`（S3応答ヘッダーまで）、
+`transfer_ms`（クライアントへの転送時間）、`bytes_sent`（本文送信バイト数）を記録します。
+転送時間にはS3からの読み込みとクライアント側の受信待ちの両方が含まれます。
 
 実環境での速度改善は、同じオブジェクトに対する初回と連続アクセスの応答時間（p50/p95）で確認してください。
 この変更による実S3/RustFSでの短縮時間は未計測です。

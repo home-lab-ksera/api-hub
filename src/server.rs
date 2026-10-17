@@ -11,6 +11,9 @@ use tracing::{Instrument, debug, error, info, info_span, warn};
 const S3_CORS_ALLOWED_ORIGIN: &str = "https://hitomi-upload-viewer.internal.qroksera.com";
 
 pub async fn handle_connection(mut stream: TcpStream, app_state: AppState) {
+    if let Err(error) = stream.set_nodelay(true) {
+        warn!(%error, "Failed to enable TCP_NODELAY");
+    }
     let mut decoder = request_decoder();
     let mut buffer = vec![0_u8; 8192];
 
@@ -242,6 +245,7 @@ async fn write_preview_stream_response(
 
     match result {
         Ok(mut stream_response) => {
+            let upstream_headers_ms = start.elapsed().as_millis() as u64;
             let mut head =
                 Response::new(stream_response.status_code, stream_response.reason_phrase)
                     .omit_body(true);
@@ -259,7 +263,9 @@ async fn write_preview_stream_response(
             let encoded_head = head.encode();
             stream.write_all(&encoded_head).await?;
 
-            let mut chunk = vec![0_u8; 16 * 1024];
+            let transfer_start = std::time::Instant::now();
+            let mut bytes_sent = 0_u64;
+            let mut chunk = vec![0_u8; 64 * 1024];
             loop {
                 let n = stream_response
                     .body_stream
@@ -270,10 +276,20 @@ async fn write_preview_stream_response(
                     break;
                 }
                 stream.write_all(&chunk[..n]).await?;
+                bytes_sent += n as u64;
             }
             stream.flush().await?;
 
             let latency_ms = start.elapsed().as_millis() as u64;
+            info!(
+                target: "s3::download",
+                request_id = %request_id,
+                status = stream_response.status_code,
+                upstream_headers_ms,
+                transfer_ms = transfer_start.elapsed().as_millis() as u64,
+                bytes_sent,
+                "Download transfer completed"
+            );
             match stream_response.status_code {
                 200..=299 => info!(
                     target: "http::response",
@@ -690,6 +706,90 @@ fn apply_s3_cors(path: &str, request: &Request, response: &mut Response) {
 #[cfg(test)]
 mod tests {
     use super::request_decoder;
+
+    #[tokio::test]
+    async fn preview_streams_range_before_upstream_finishes_and_reuses_connection() {
+        use crate::{
+            config::{settings::Settings, state::AppState},
+            http_client::HttpClient,
+        };
+        use shiguredo_http11::RequestDecoder;
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::{TcpListener, TcpStream},
+            sync::oneshot,
+            time::{Duration, timeout},
+        };
+
+        timeout(Duration::from_secs(5), async {
+            let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", upstream.local_addr().unwrap());
+            let (release, wait) = oneshot::channel();
+            let payload: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+            let expected = payload.clone();
+            let upstream_task = tokio::spawn(async move {
+                let (mut socket, _) = upstream.accept().await.unwrap();
+                let mut decoder = RequestDecoder::new();
+                let mut wait = Some(wait);
+                for index in 0..2 {
+                    let request = loop {
+                        if let Some(request) = decoder.decode().unwrap() { break request; }
+                        let mut buffer = [0; 4096];
+                        let n = socket.read(&mut buffer).await.unwrap();
+                        assert_ne!(n, 0);
+                        decoder.feed(&buffer[..n]).unwrap();
+                    };
+                    if index == 0 {
+                        assert_eq!(request.get_header("range"), Some("bytes=0-262143"));
+                        let head = format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 0-262143/524288\r\nETag: \"test\"\r\n\r\n", payload.len());
+                        socket.write_all(head.as_bytes()).await.unwrap();
+                        socket.write_all(&payload[..3]).await.unwrap();
+                        wait.take().unwrap().await.unwrap();
+                        socket.write_all(&payload[3..]).await.unwrap();
+                    } else {
+                        assert_eq!(request.get_header("if-none-match"), Some("\"test\""));
+                        socket.write_all(b"HTTP/1.1 304 Not Modified\r\nETag: \"test\"\r\n\r\n").await.unwrap();
+                    }
+                }
+            });
+            let state = AppState {
+                client: HttpClient::new(),
+                settings: Settings {
+                    slack_bot_token: String::new(), slack_api_base_url: String::new(),
+                    s3_access_key_id: "test".into(), s3_secret_access_key: "test".into(),
+                    s3_region: "us-east-1".into(), s3_endpoint: Some(endpoint),
+                    s3_use_path_style: true, s3_session_token: None,
+                },
+            };
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let api_task = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                super::handle_connection(socket, state).await;
+            });
+            // Use a raw downstream socket so the new upstream fast path is
+            // checked independently from the client's response decoder.
+            client.write_all(b"GET /s3/preview/b/file.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-262143\r\n\r\n").await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") { head.push(client.read_u8().await.unwrap()); }
+            let head = String::from_utf8(head).unwrap();
+            assert!(head.starts_with("HTTP/1.1 206"));
+            assert!(head.to_ascii_lowercase().contains("content-range: bytes 0-262143/524288"));
+            let mut actual = vec![0; expected.len()];
+            client.read_exact(&mut actual[..3]).await.unwrap();
+            assert_eq!(&actual[..3], &expected[..3]);
+            release.send(()).unwrap();
+            client.read_exact(&mut actual[3..]).await.unwrap();
+            assert_eq!(actual, expected);
+            client.write_all(b"GET /s3/preview/b/file.bin HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"test\"\r\nConnection: close\r\n\r\n").await.unwrap();
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).await.unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 304"));
+            assert!(response.ends_with(b"\r\n\r\n"));
+            upstream_task.await.unwrap();
+            api_task.await.unwrap();
+        }).await.unwrap();
+    }
 
     #[test]
     fn accepts_uploads_larger_than_default_limit() {
