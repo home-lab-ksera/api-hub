@@ -130,3 +130,79 @@ cargo test --all-targets
 ## CI
 
 GitHub Actionsで `cargo test --all-targets` を実行します。
+
+## Slack投稿の拡張
+
+`POST /slack/message` は既存の `channel`・`text` に加え、`thread_ts` と `blocks` を受け付けます。
+`text` は通知・読み上げ用の代替テキストとして必須です。`blocks` は最大50件です。
+
+```json
+{
+  "channel": "C123",
+  "text": "レポートを作成しました",
+  "thread_ts": "1234567890.123456",
+  "blocks": [
+    { "type": "section", "text": { "type": "mrkdwn", "text": "*レポート作成完了*" } }
+  ]
+}
+```
+
+`POST /slack/message/update` で投稿を更新できます。
+`ts` は投稿時のSlackレスポンスに含まれる値を指定します。
+投稿・更新のレスポンスは既存APIと同じく、SlackレスポンスJSONを文字列としてJSONエンコードしたものです。
+`ts` を取得する際は外側のJSON文字列をデコードした後、その内容をJSONとして解析してください。
+Bot自身の投稿が対象で、`chat:write` が必要です。
+`blocks` を省略した場合の扱いはSlack APIに従います。明示的に消す場合は `blocks: []` を指定します。
+
+```json
+{ "channel": "C123", "ts": "1234567890.123456", "text": "処理が完了しました", "blocks": [] }
+```
+
+## S3コピー・タグ操作
+
+- `POST /s3/copy_object`
+  - body: `{ "bucket": "destination", "key": "backup/report.pdf", "source_bucket": "source", "source_key": "reports/report.pdf", "source_version_id": null }`
+  - 同じ接続先のバケット内・バケット間でコピーします。キーはURLエンコードせず渡してください。
+  - 元のメタデータを引き継ぎます。コピー先に同名キーがあれば上書きします。
+  - 単一のCopyObjectを使用します。5 GBを超えるオブジェクトの自動multipart copyは未対応です。
+- `POST /s3/put_object_tagging`
+  - body: `{ "bucket": "b", "key": "report.pdf", "tags": [{ "key": "status", "value": "done" }], "version_id": null }`
+  - タグ全体を置き換えます。最大10件、キーは重複不可。キー128文字・値256文字まで。
+  - `tags: []` で全タグを削除できます。
+- `POST /s3/get_object_tagging`
+  - body: `{ "bucket": "b", "key": "report.pdf", "version_id": null }`
+  - response: `{ "version_id": null, "tags": [{ "key": "status", "value": "done" }] }`
+- `POST /s3/delete_object_tagging`
+  - body: `{ "bucket": "b", "key": "report.pdf", "version_id": null }`
+  - オブジェクト本体を残し、全タグを削除します。
+
+コピーにはコピー元の読み取り・コピー先の書き込み権限、タグ操作には対応するS3タグ操作の権限が必要です。
+RustFSの稼働バージョン・権限設定に対する実環境での確認は別途必要です。
+
+## S3保存後のSlack通知
+
+`POST /s3/put_object_and_notify` でBase64データを保存し、署名付きGET URLをSlackへ投稿できます。
+
+```json
+{
+  "bucket": "b",
+  "key": "reports/hello.txt",
+  "file_data_base64": "aGVsbG8=",
+  "content_type": "text/plain",
+  "channel": "C123",
+  "text": "レポートを保存しました",
+  "expires_in_secs": 900
+}
+```
+
+`text` の既定値は `File uploaded`、URL有効期間の既定値は900秒です（1〜604800秒）。
+有効期間はアップロード前の署名時点から始まります。
+URLは `RUSTFS_S3_ENDPOINT` を使用するため、Slackの受信者がそのアドレスにアクセスできる必要があります。
+
+レスポンスは `uploaded`・`object`（ETag・version ID）・`url`・`notified`・`notification_error` を返します。
+保存成功後に通知だけが失敗した場合もHTTP 200で、`uploaded: true, notified: false` を返します。
+保存済みのファイルは削除しません。再アップロードせず、返されたURLを使って `/slack/message` から通知だけを再試行してください。
+URLが期限切れの場合は `/s3/presigned_get_object` で再発行できます。
+
+保存に失敗した場合はSlackへ投稿しません。保存・通知の自動再試行は行いません。
+この機能は専用エンドポイント経由の保存が対象です。既存のストリーミングアップロードや他クライアントからの保存に対するRustFS Webhook通知は含みません。

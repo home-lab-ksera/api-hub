@@ -5,36 +5,64 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::{config::state::AppState, errors::api_error::ApiError, service::slack_service};
 
-pub struct SlackMessageRequest {
-    pub channel: String,
-    pub text: String,
-}
-
 struct UploadQuery {
     pub channel: String,
     pub file_name: Option<String>,
 }
 
-fn parse_message_request(body: &str) -> Result<SlackMessageRequest, ApiError> {
+fn message_payload(body: &str, update: bool) -> Result<String, ApiError> {
+    use super::s3_handler::{get_optional_string, get_required_string};
     let json = nojson::RawJson::parse(body)
         .map_err(|e| ApiError::BadRequest(format!("Invalid JSON: {e}")))?;
     let root = json.value();
-    let channel: String = root
-        .to_member("channel")
+    let channel = get_required_string(root, "channel")?;
+    let text = get_required_string(root, "text")?;
+    if channel.trim().is_empty() || text.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "channel and text must not be empty".into(),
+        ));
+    }
+    let ts = if update {
+        Some(get_required_string(root, "ts")?)
+    } else {
+        get_optional_string(root, "thread_ts")?
+    };
+    if ts.as_ref().is_some_and(|v| v.trim().is_empty()) {
+        return Err(ApiError::BadRequest(
+            "Message timestamp must not be empty".into(),
+        ));
+    }
+    let blocks = root
+        .to_member("blocks")
         .map_err(|e| ApiError::BadRequest(e.to_string()))?
-        .required()
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?
-        .try_into()
-        .map_err(|e| ApiError::BadRequest(format!("Invalid 'channel': {e}")))?;
-    let text: String = root
-        .to_member("text")
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?
-        .required()
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?
-        .try_into()
-        .map_err(|e| ApiError::BadRequest(format!("Invalid 'text': {e}")))?;
-
-    Ok(SlackMessageRequest { channel, text })
+        .optional();
+    if let Some(blocks) = blocks {
+        let blocks = blocks
+            .to_array()
+            .map_err(|_| ApiError::BadRequest("blocks must be an array".into()))?;
+        let mut count = 0;
+        for block in blocks {
+            get_required_string(block, "type")?;
+            count += 1;
+        }
+        if count > 50 {
+            return Err(ApiError::BadRequest("At most 50 blocks are allowed".into()));
+        }
+    }
+    Ok(nojson::json(|f| {
+        f.object(|f| {
+            f.member("channel", &channel)?;
+            f.member("text", &text)?;
+            if let Some(ts) = &ts {
+                f.member(if update { "ts" } else { "thread_ts" }, ts)?;
+            }
+            if let Some(blocks) = blocks {
+                f.member("blocks", blocks)?;
+            }
+            Ok(())
+        })
+    })
+    .to_string())
 }
 
 fn parse_upload_query(raw_query: Option<&str>) -> Result<UploadQuery, ApiError> {
@@ -182,45 +210,29 @@ fn json_string_response(value: String) -> Response {
         .body(body.into_bytes())
 }
 
-#[instrument(skip(app_state, body))]
 pub async fn post_message(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = String::from_utf8(body.to_vec())
-        .map_err(|_| ApiError::BadRequest("Request body must be valid UTF-8".to_string()))?;
-    let payload = parse_message_request(&body)?;
+    message(app_state, body, false).await
+}
 
-    debug!(
-        channel = %payload.channel,
-        text_length = payload.text.len(),
-        "Processing Slack message request"
-    );
+pub async fn update_message(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+    message(app_state, body, true).await
+}
 
-    let start = Instant::now();
-
-    let response_text = slack_service::post_message(
+#[instrument(skip(app_state, body))]
+async fn message(app_state: &AppState, body: &[u8], update: bool) -> Result<Response, ApiError> {
+    let body = std::str::from_utf8(body)
+        .map_err(|_| ApiError::BadRequest("Request body must be valid UTF-8".into()))?;
+    let payload = message_payload(body, update)?;
+    let response = slack_service::send_message(
         &app_state.client,
         &app_state.settings.slack_bot_token,
         &app_state.settings.slack_api_base_url,
-        &payload.channel,
-        &payload.text,
+        update,
+        &payload,
     )
     .await
-    .map_err(|e| {
-        error!(
-            error = %e,
-            channel = %payload.channel,
-            "Failed to post message to Slack"
-        );
-        ApiError::InternalServerError(e.to_string())
-    })?;
-
-    let duration = start.elapsed();
-    info!(
-        channel = %payload.channel,
-        duration_ms = duration.as_millis() as u64,
-        "Successfully posted message to Slack"
-    );
-
-    Ok(json_string_response(response_text))
+    .map_err(|e| ApiError::InternalServerError(e.to_string()))?;
+    Ok(json_string_response(response))
 }
 
 #[instrument(skip(app_state, headers, body))]
@@ -231,7 +243,7 @@ pub async fn upload_image_raw(
     body: &[u8],
 ) -> Result<Response, ApiError> {
     let payload = parse_upload_query(raw_query)?;
-    let content_type = content_type(&headers)?;
+    let content_type = content_type(headers)?;
     validate_file_not_empty(body)?;
     let extension = ensure_image_content(&content_type, body)?;
     let file_name = payload
@@ -287,7 +299,7 @@ pub async fn upload_pdf_raw(
     body: &[u8],
 ) -> Result<Response, ApiError> {
     let payload = parse_upload_query(raw_query)?;
-    let content_type = content_type(&headers)?;
+    let content_type = content_type(headers)?;
     validate_file_not_empty(body)?;
 
     if content_type != "application/pdf" {

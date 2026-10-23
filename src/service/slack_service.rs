@@ -1,6 +1,6 @@
 use shiguredo_http11::uri::percent_encode_query;
 use std::error::Error as StdError;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument};
 
 use crate::http_client::{HttpClient, HttpRequest};
 
@@ -35,67 +35,64 @@ fn get_optional_string(root: nojson::RawJsonValue<'_, '_>, name: &str) -> Option
     String::try_from(value).ok()
 }
 
-#[instrument(skip(client, slack_bot_token, text), fields(channel = %channel))]
 pub async fn post_message(
     client: &HttpClient,
-    slack_bot_token: &str,
-    slack_api_base_url: &str,
+    token: &str,
+    base_url: &str,
     channel: &str,
     text: &str,
 ) -> Result<String, Box<dyn StdError>> {
-    let url = format!("{}/chat.postMessage", slack_api_base_url);
-
     let payload = nojson::json(|f| {
         f.object(|f| {
             f.member("channel", channel)?;
             f.member("text", text)
         })
-    });
+    })
+    .to_string();
+    send_message(client, token, base_url, false, &payload).await
+}
 
-    debug!(
-        api_endpoint = "chat.postMessage",
-        channel = %channel,
-        "Calling Slack API"
-    );
-
+/// The method is selected by the application, never by an arbitrary request URL.
+#[instrument(skip(client, token, base_url, payload))]
+pub async fn send_message(
+    client: &HttpClient,
+    token: &str,
+    base_url: &str,
+    update: bool,
+    payload: &str,
+) -> Result<String, Box<dyn StdError>> {
+    let method = if update {
+        "chat.update"
+    } else {
+        "chat.postMessage"
+    };
+    debug!(api_endpoint = method, "Calling Slack API");
     let response = client
         .send(HttpRequest {
-            method: "POST".to_string(),
-            url,
+            method: "POST".into(),
+            url: format!("{}/{method}", base_url.trim_end_matches('/')),
             headers: vec![
+                ("Authorization".into(), format!("Bearer {token}")),
                 (
-                    "Authorization".to_string(),
-                    format!("Bearer {slack_bot_token}"),
+                    "Content-Type".into(),
+                    "application/json; charset=utf-8".into(),
                 ),
-                ("Content-Type".to_string(), "application/json".to_string()),
             ],
-            body: payload.to_string().into_bytes(),
+            body: payload.as_bytes().to_vec(),
         })
         .await?;
-
-    let response = String::from_utf8(response.body)
-        .map_err(|e| Box::<dyn StdError>::from(std::io::Error::other(e.to_string())))?;
-
-    let parsed = nojson::RawJson::parse(&response)?;
-    let root = parsed.value();
-    let ok = get_required_bool(root, "ok")?;
-
-    if !ok {
-        let error_message =
-            get_optional_string(root, "error").unwrap_or_else(|| "unknown_error".to_string());
-        warn!(
-            error = %error_message,
-            channel = %channel,
-            "Slack API returned error response"
+    if !(200..300).contains(&response.status_code) {
+        return Err(
+            std::io::Error::other(format!("Slack HTTP status {}", response.status_code)).into(),
         );
-        return Err(Box::new(std::io::Error::other(error_message)));
     }
-
-    debug!(
-        channel = %channel,
-        "Slack API call successful"
-    );
-
+    let response = String::from_utf8(response.body)?;
+    let parsed = nojson::RawJson::parse(&response)?;
+    if !get_required_bool(parsed.value(), "ok")? {
+        let error =
+            get_optional_string(parsed.value(), "error").unwrap_or_else(|| "unknown_error".into());
+        return Err(std::io::Error::other(error).into());
+    }
     Ok(response)
 }
 

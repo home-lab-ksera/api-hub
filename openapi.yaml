@@ -7,6 +7,135 @@ info:
 servers:
   - url: http://localhost:3000
 paths:
+  /slack/message/update:
+    post:
+      operationId: updateSlackMessage
+      summary: Update a Slack message
+      description: Updates a message posted by the authenticated bot. Requires chat:write. Supply channel
+        and the ts returned by Slack.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SlackUpdateMessageRequest'
+      responses:
+        '200':
+          description: Operation result
+          content:
+            application/json:
+              schema:
+                type: string
+                description: JSON-encoded Slack response, matching /slack/message.
+        default:
+          $ref: '#/components/responses/ProblemDetails'
+  /s3/copy_object:
+    post:
+      operationId: copyObject
+      summary: Copy an S3 object
+      description: Copies within the configured S3 endpoint, including between buckets, preserving source
+        metadata. Replaces an existing destination key. Single CopyObject only; no automatic multipart copy
+        for objects larger than 5 GB.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/S3CopyObjectRequest'
+      responses:
+        '200':
+          description: Operation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3CopyObjectResponse'
+        default:
+          $ref: '#/components/responses/ProblemDetails'
+  /s3/get_object_tagging:
+    post:
+      operationId: getObjectTagging
+      summary: Read object tags
+      description: Reads the current object or the specified version.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/S3ObjectTaggingRequest'
+      responses:
+        '200':
+          description: Operation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3GetObjectTaggingResponse'
+        default:
+          $ref: '#/components/responses/ProblemDetails'
+  /s3/put_object_tagging:
+    post:
+      operationId: putObjectTagging
+      summary: Replace object tags
+      description: Replaces all tags on the current object or specified version; does not merge. Maximum
+        ten tags with unique keys.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/S3PutObjectTaggingRequest'
+      responses:
+        '200':
+          description: Operation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3ObjectTaggingResponse'
+        default:
+          $ref: '#/components/responses/ProblemDetails'
+  /s3/delete_object_tagging:
+    post:
+      operationId: deleteObjectTagging
+      summary: Delete all object tags
+      description: Deletes the tag set, leaving the object intact.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/S3ObjectTaggingRequest'
+      responses:
+        '200':
+          description: Operation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3ObjectTaggingResponse'
+        default:
+          $ref: '#/components/responses/ProblemDetails'
+  /s3/put_object_and_notify:
+    post:
+      operationId: putObjectAndNotify
+      summary: Upload an object and notify Slack
+      description: Uploads Base64 data, then posts text and a presigned GET URL to Slack. HTTP 200 with
+        uploaded=true and notified=false means the file was saved but Slack failed; inspect notification_error
+        and retry only /slack/message. No rollback or automatic retry. The URL uses RUSTFS_S3_ENDPOINT,
+        which must be reachable by recipients; its lifetime starts when signing before upload. This endpoint
+        does not observe uploads made by other clients.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/S3PutObjectAndNotifyRequest'
+      responses:
+        '200':
+          description: Operation result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/S3PutObjectAndNotifyResponse'
+        default:
+          $ref: '#/components/responses/ProblemDetails'
   /s3/put_object_stream:
     post:
       operationId: putObjectStream
@@ -609,9 +738,33 @@ components:
       properties:
         channel:
           type: string
+          minLength: 1
         text:
           type: string
-      required: [channel, text]
+          minLength: 1
+        thread_ts:
+          type:
+          - string
+          - 'null'
+          minLength: 1
+          description: Parent message timestamp for a thread reply.
+        blocks:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                minLength: 1
+            required:
+            - type
+            additionalProperties: true
+          description: Slack Block Kit blocks; text is required as a notification/accessibility fallback.
+            An empty array removes existing blocks on update.
+      required:
+      - channel
+      - text
 
     S3BucketRequest:
       type: object
@@ -1081,3 +1234,191 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/S3BucketSummary'
+
+    SlackUpdateMessageRequest:
+      type: object
+      properties:
+        channel:
+          type: string
+          minLength: 1
+        text:
+          type: string
+          minLength: 1
+        ts:
+          type: string
+          minLength: 1
+        blocks:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                minLength: 1
+            required:
+            - type
+            additionalProperties: true
+          description: Slack Block Kit blocks; text is required as a notification/accessibility fallback.
+            An empty array removes existing blocks on update.
+      required:
+      - channel
+      - text
+      - ts
+    S3CopyObjectRequest:
+      type: object
+      properties:
+        bucket:
+          type: string
+          minLength: 1
+        key:
+          type: string
+          minLength: 1
+        source_bucket:
+          type: string
+          minLength: 1
+        source_key:
+          type: string
+          minLength: 1
+          description: Decoded source key; the server URL-encodes it exactly once.
+        source_version_id:
+          type:
+          - string
+          - 'null'
+      required:
+      - bucket
+      - key
+      - source_bucket
+      - source_key
+    S3CopyObjectResponse:
+      type: object
+      properties:
+        e_tag:
+          type:
+          - string
+          - 'null'
+        last_modified:
+          type:
+          - string
+          - 'null'
+        version_id:
+          type:
+          - string
+          - 'null'
+        copy_source_version_id:
+          type:
+          - string
+          - 'null'
+    S3ObjectTaggingRequest:
+      type: object
+      properties:
+        bucket:
+          type: string
+          minLength: 1
+        key:
+          type: string
+          minLength: 1
+        version_id:
+          type:
+          - string
+          - 'null'
+      required:
+      - bucket
+      - key
+    S3ObjectTag:
+      type: object
+      properties:
+        key:
+          type: string
+          minLength: 1
+          maxLength: 128
+        value:
+          type: string
+          maxLength: 256
+      required:
+      - key
+      - value
+    S3PutObjectTaggingRequest:
+      allOf:
+      - $ref: '#/components/schemas/S3ObjectTaggingRequest'
+      - type: object
+        properties:
+          tags:
+            type: array
+            maxItems: 10
+            items:
+              $ref: '#/components/schemas/S3ObjectTag'
+            description: Unique keys; replaces the entire tag set. Empty array clears all tags.
+        required:
+        - tags
+    S3ObjectTaggingResponse:
+      type: object
+      properties:
+        version_id:
+          type:
+          - string
+          - 'null'
+    S3GetObjectTaggingResponse:
+      type: object
+      properties:
+        version_id:
+          type:
+          - string
+          - 'null'
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/S3ObjectTag'
+      required:
+      - tags
+    S3PutObjectAndNotifyRequest:
+      allOf:
+      - $ref: '#/components/schemas/S3PutObjectBase64Request'
+      - type: object
+        properties:
+          bucket:
+            type: string
+            minLength: 1
+          key:
+            type: string
+            minLength: 1
+          channel:
+            type: string
+            minLength: 1
+          text:
+            type:
+            - string
+            - 'null'
+            default: File uploaded
+          expires_in_secs:
+            type:
+            - integer
+            - 'null'
+            minimum: 1
+            maximum: 604800
+            default: 900
+        required:
+        - channel
+    S3PutObjectAndNotifyResponse:
+      type: object
+      properties:
+        uploaded:
+          type: boolean
+          const: true
+        object:
+          $ref: '#/components/schemas/S3PutObjectResponse'
+        url:
+          type: string
+          format: uri
+        notified:
+          type: boolean
+        notification_error:
+          type:
+          - string
+          - 'null'
+      required:
+      - uploaded
+      - object
+      - url
+      - notified
+      - notification_error

@@ -536,6 +536,24 @@ async fn route_request(
     match (request.method.as_str(), path) {
         ("GET", "/health") => return Ok(health_handler::health()),
         ("GET", "/openapi.json") => return Ok(openapi_handler::openapi_json()),
+        ("POST", "/slack/message/update") => {
+            return slack_handler::update_message(app_state, &request.body).await;
+        }
+        ("POST", "/s3/copy_object") => {
+            return s3_handler::copy_object(app_state, &request.body).await;
+        }
+        ("POST", "/s3/get_object_tagging") => {
+            return s3_handler::get_object_tagging(app_state, &request.body).await;
+        }
+        ("POST", "/s3/put_object_tagging") => {
+            return s3_handler::put_object_tagging(app_state, &request.body).await;
+        }
+        ("POST", "/s3/delete_object_tagging") => {
+            return s3_handler::delete_object_tagging(app_state, &request.body).await;
+        }
+        ("POST", "/s3/put_object_and_notify") => {
+            return s3_handler::put_object_and_notify(app_state, &request.body).await;
+        }
         ("POST", "/slack/message") => {
             return slack_handler::post_message(app_state, &request.body).await;
         }
@@ -642,6 +660,12 @@ fn is_known_path(path: &str) -> bool {
         path,
         "/health"
             | "/openapi.json"
+            | "/slack/message/update"
+            | "/s3/copy_object"
+            | "/s3/get_object_tagging"
+            | "/s3/put_object_tagging"
+            | "/s3/delete_object_tagging"
+            | "/s3/put_object_and_notify"
             | "/slack/message"
             | "/slack/upload/image"
             | "/slack/upload/pdf"
@@ -818,3 +842,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod extensions_tests;

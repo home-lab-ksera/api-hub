@@ -294,7 +294,7 @@ pub async fn get_object(
         f.object(|f| {
             f.member("file_data_base64", BASE64_STANDARD.encode(&output.body))?;
             f.member("content_type", &output.content_type)?;
-            f.member("content_length", &output.content_length)?;
+            f.member("content_length", output.content_length)?;
             f.member("e_tag", &output.e_tag)?;
             f.member("last_modified", &output.last_modified)?;
             f.member("version_id", &output.version_id)?;
@@ -379,7 +379,7 @@ pub async fn head_object(
     Ok(nojson::json(|f| {
         f.object(|f| {
             f.member("content_type", &output.content_type)?;
-            f.member("content_length", &output.content_length)?;
+            f.member("content_length", output.content_length)?;
             f.member("e_tag", &output.e_tag)?;
             f.member("last_modified", &output.last_modified)?;
             f.member("version_id", &output.version_id)?;
@@ -407,7 +407,7 @@ pub async fn delete_object(
 
     Ok(nojson::json(|f| {
         f.object(|f| {
-            f.member("delete_marker", &output.delete_marker)?;
+            f.member("delete_marker", output.delete_marker)?;
             f.member("version_id", &output.version_id)
         })
     })
@@ -447,7 +447,7 @@ pub async fn delete_objects(
                         f.element(nojson::object(|f| {
                             f.member("key", &deleted.key)?;
                             f.member("version_id", &deleted.version_id)?;
-                            f.member("delete_marker", &deleted.delete_marker)?;
+                            f.member("delete_marker", deleted.delete_marker)?;
                             f.member(
                                 "delete_marker_version_id",
                                 &deleted.delete_marker_version_id,
@@ -507,12 +507,12 @@ pub async fn list_objects_v2(
 
     Ok(nojson::json(|f| {
         f.object(|f| {
-            f.member("is_truncated", &output.is_truncated)?;
+            f.member("is_truncated", output.is_truncated)?;
             f.member("name", &output.name)?;
             f.member("prefix", &output.prefix)?;
             f.member("delimiter", &output.delimiter)?;
-            f.member("max_keys", &output.max_keys)?;
-            f.member("key_count", &output.key_count)?;
+            f.member("max_keys", output.max_keys)?;
+            f.member("key_count", output.key_count)?;
             f.member("continuation_token", &output.continuation_token)?;
             f.member("next_continuation_token", &output.next_continuation_token)?;
             f.member("start_after", &output.start_after)?;
@@ -692,10 +692,10 @@ pub async fn list_parts(
             f.member("bucket", &output.bucket)?;
             f.member("key", &output.key)?;
             f.member("upload_id", &output.upload_id)?;
-            f.member("part_number_marker", &output.part_number_marker)?;
-            f.member("next_part_number_marker", &output.next_part_number_marker)?;
-            f.member("max_parts", &output.max_parts)?;
-            f.member("is_truncated", &output.is_truncated)?;
+            f.member("part_number_marker", output.part_number_marker)?;
+            f.member("next_part_number_marker", output.next_part_number_marker)?;
+            f.member("max_parts", output.max_parts)?;
+            f.member("is_truncated", output.is_truncated)?;
             f.member("storage_class", &output.storage_class)?;
             f.member(
                 "parts",
@@ -757,8 +757,8 @@ pub async fn list_multipart_uploads(
             f.member("next_upload_id_marker", &output.next_upload_id_marker)?;
             f.member("prefix", &output.prefix)?;
             f.member("delimiter", &output.delimiter)?;
-            f.member("max_uploads", &output.max_uploads)?;
-            f.member("is_truncated", &output.is_truncated)?;
+            f.member("max_uploads", output.max_uploads)?;
+            f.member("is_truncated", output.is_truncated)?;
             f.member(
                 "uploads",
                 nojson::array(|f| {
@@ -1018,6 +1018,166 @@ fn map_s3_input_error_to_api_error(error: shiguredo_s3::Error) -> ApiError {
 
 fn map_s3_runtime_error_to_api_error(error: shiguredo_s3::Error) -> ApiError {
     ApiError::InternalServerError(error.to_string())
+}
+
+/// Copy-source is supplied as decoded bucket/key, then encoded exactly once.
+pub struct CopyObjectInput {
+    pub bucket: String,
+    pub key: String,
+    pub source_bucket: String,
+    pub source_key: String,
+    pub source_version_id: Option<String>,
+}
+
+fn encode_copy_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
+            encoded.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            write!(&mut encoded, "%{byte:02X}").unwrap();
+        }
+    }
+    encoded
+}
+
+pub async fn copy_object(
+    http: &HttpClient,
+    settings: &Settings,
+    input: CopyObjectInput,
+) -> Result<String, ApiError> {
+    let s3 = create_s3_client(settings)?;
+    let mut source = format!(
+        "{}/{}",
+        encode_copy_component(&input.source_bucket),
+        input
+            .source_key
+            .split('/')
+            .map(encode_copy_component)
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    if let Some(version) = input.source_version_id {
+        source.push_str(&format!("?versionId={}", encode_copy_component(&version)));
+    }
+    let request = s3
+        .copy_object()
+        .bucket(input.bucket)
+        .key(input.key)
+        .copy_source(source)
+        .build_request()
+        .map_err(map_s3_input_error_to_api_error)?;
+    let response = execute_s3(http, request).await?;
+    let output = shiguredo_s3::api::CopyObjectFluentBuilder::parse_response(&response)
+        .map_err(map_s3_runtime_error_to_api_error)?;
+    Ok(nojson::json(|f| {
+        f.object(|f| {
+            f.member("e_tag", &output.e_tag)?;
+            f.member("last_modified", &output.last_modified)?;
+            f.member("version_id", &output.version_id)?;
+            f.member("copy_source_version_id", &output.copy_source_version_id)
+        })
+    })
+    .to_string())
+}
+
+pub struct ObjectTaggingInput {
+    pub bucket: String,
+    pub key: String,
+    pub version_id: Option<String>,
+}
+
+pub async fn get_object_tagging(
+    http: &HttpClient,
+    settings: &Settings,
+    input: ObjectTaggingInput,
+) -> Result<String, ApiError> {
+    let s3 = create_s3_client(settings)?;
+    let mut builder = s3.get_object_tagging().bucket(input.bucket).key(input.key);
+    if let Some(version) = input.version_id {
+        builder = builder.version_id(version);
+    }
+    let request = builder
+        .build_request()
+        .map_err(map_s3_input_error_to_api_error)?;
+    let response = execute_s3(http, request).await?;
+    let output = shiguredo_s3::api::GetObjectTaggingFluentBuilder::parse_response(&response)
+        .map_err(map_s3_runtime_error_to_api_error)?;
+    Ok(nojson::json(|f| {
+        f.object(|f| {
+            f.member("version_id", &output.version_id)?;
+            f.member(
+                "tags",
+                nojson::array(|f| {
+                    for tag in &output.tag_set {
+                        f.element(nojson::object(|f| {
+                            f.member("key", &tag.key)?;
+                            f.member("value", &tag.value)
+                        }))?;
+                    }
+                    Ok(())
+                }),
+            )?;
+            Ok(())
+        })
+    })
+    .to_string())
+}
+
+pub async fn put_object_tagging(
+    http: &HttpClient,
+    settings: &Settings,
+    input: ObjectTaggingInput,
+    tags: Vec<shiguredo_s3::types::Tag>,
+) -> Result<String, ApiError> {
+    let s3 = create_s3_client(settings)?;
+    let mut builder = s3.put_object_tagging().bucket(input.bucket).key(input.key);
+    if let Some(version) = input.version_id {
+        builder = builder.version_id(version);
+    }
+    builder = builder.tagging(shiguredo_s3::types::Tagging { tag_set: tags });
+    let request = builder
+        .build_request()
+        .map_err(map_s3_input_error_to_api_error)?;
+    let response = execute_s3(http, request).await?;
+    let output = shiguredo_s3::api::PutObjectTaggingFluentBuilder::parse_response(&response)
+        .map_err(map_s3_runtime_error_to_api_error)?;
+    Ok(nojson::json(|f| {
+        f.object(|f| {
+            f.member("version_id", &output.version_id)?;
+            Ok(())
+        })
+    })
+    .to_string())
+}
+
+pub async fn delete_object_tagging(
+    http: &HttpClient,
+    settings: &Settings,
+    input: ObjectTaggingInput,
+) -> Result<String, ApiError> {
+    let s3 = create_s3_client(settings)?;
+    let mut builder = s3
+        .delete_object_tagging()
+        .bucket(input.bucket)
+        .key(input.key);
+    if let Some(version) = input.version_id {
+        builder = builder.version_id(version);
+    }
+    let request = builder
+        .build_request()
+        .map_err(map_s3_input_error_to_api_error)?;
+    let response = execute_s3(http, request).await?;
+    let output = shiguredo_s3::api::DeleteObjectTaggingFluentBuilder::parse_response(&response)
+        .map_err(map_s3_runtime_error_to_api_error)?;
+    Ok(nojson::json(|f| {
+        f.object(|f| {
+            f.member("version_id", &output.version_id)?;
+            Ok(())
+        })
+    })
+    .to_string())
 }
 
 #[cfg(test)]
