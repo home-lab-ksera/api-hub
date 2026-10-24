@@ -21,6 +21,33 @@ async fn main() {
         "Starting application"
     );
 
+    let mode = std::env::args().nth(1).unwrap_or_default();
+    if !["", "--migrate", "--notification-worker"].contains(&mode.as_str()) {
+        eprintln!("Usage: api-hub [--migrate|--notification-worker]");
+        std::process::exit(2);
+    }
+    let database = if mode != ""
+        || std::env::var_os("PGDATABASE").is_some()
+        || std::env::var_os("DATABASE_URL").is_some()
+    {
+        match api_hub::database::connect().await {
+            Ok(pool) => Some(pool),
+            Err(error) => {
+                error!(%error, "Database connection failed");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    if mode == "--migrate" {
+        if let Err(error) = api_hub::database::migrate(database.as_ref().unwrap()).await {
+            error!(%error, "Database migration failed");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let settings = match config::settings::Settings::new() {
         Ok(s) => {
             info!(config_loaded = true, "Configuration loaded successfully");
@@ -38,7 +65,18 @@ async fn main() {
 
     let client = api_hub::http_client::HttpClient::new();
 
-    let app_state = config::state::AppState { settings, client };
+    let app_state = config::state::AppState {
+        settings,
+        client,
+        database,
+    };
+    if mode == "--notification-worker" {
+        tokio::select! {
+            _ = api_hub::notifications::worker(app_state) => {},
+            _ = shutdown_signal() => {},
+        }
+        return;
+    }
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
 

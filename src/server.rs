@@ -533,7 +533,20 @@ async fn route_request(
     path: &str,
     query: Option<&str>,
 ) -> Result<Response, ApiError> {
+    if let Some(id) = path.strip_prefix("/notifications/") {
+        if request.method == "GET" {
+            return Ok(crate::notifications::handle_get(app_state, id).await);
+        }
+        if request.method == "POST" {
+            if let Some(id) = id.strip_suffix("/retry") {
+                return Ok(crate::notifications::handle_retry(app_state, id).await);
+            }
+        }
+    }
     match (request.method.as_str(), path) {
+        ("POST", "/notifications") => {
+            return Ok(crate::notifications::handle_post(app_state, &request.body).await);
+        }
         ("GET", "/health") => return Ok(health_handler::health()),
         ("GET", "/openapi.json") => return Ok(openapi_handler::openapi_json()),
         ("POST", "/slack/message/update") => {
@@ -614,6 +627,30 @@ async fn route_request(
         ("POST", "/s3/presigned_get_object") => {
             return s3_handler::presigned_get_object(app_state, &request.body).await;
         }
+        ("POST", "/s3/browser_get_object") => {
+            return s3_handler::browser_get_object(app_state, &request.body).await;
+        }
+        ("GET", "/s3/browser_open") => {
+            let fields: std::collections::HashMap<_, _> =
+                url::form_urlencoded::parse(query.unwrap_or("").as_bytes())
+                    .into_owned()
+                    .collect();
+            let body = serde_json::to_vec(&fields)
+                .map_err(|_| ApiError::BadRequest("Invalid object".into()))?;
+            let response = s3_handler::browser_get_object(app_state, &body).await?;
+            if response.status_code != 200 {
+                return Ok(response);
+            }
+            let value: serde_json::Value = serde_json::from_slice(&response.body)
+                .map_err(|_| ApiError::InternalServerError("Invalid signed response".into()))?;
+            let location = value["url"]
+                .as_str()
+                .ok_or_else(|| ApiError::InternalServerError("Missing signed URL".into()))?;
+            return Ok(Response::new(307, "Temporary Redirect")
+                .header("Location", location)
+                .header("Cache-Control", "no-store")
+                .header("Referrer-Policy", "no-referrer"));
+        }
         ("POST", "/s3/presigned_put_object") => {
             return s3_handler::presigned_put_object(app_state, &request.body).await;
         }
@@ -630,6 +667,7 @@ async fn route_request(
             return s3_handler::delete_bucket(app_state, &request.body).await;
         }
         ("OPTIONS", "/s3/list_objects_v2")
+        | ("OPTIONS", "/s3/browser_get_object")
         | ("OPTIONS", "/s3/presigned_get_object")
         | ("OPTIONS", "/s3/put_object_stream") => {
             return Ok(s3_handler::s3_preflight());
@@ -658,7 +696,8 @@ fn split_uri(uri: &str) -> (&str, Option<&str>) {
 fn is_known_path(path: &str) -> bool {
     matches!(
         path,
-        "/health"
+        "/notifications"
+            | "/health"
             | "/openapi.json"
             | "/slack/message/update"
             | "/s3/copy_object"
@@ -683,12 +722,15 @@ fn is_known_path(path: &str) -> bool {
             | "/s3/list_parts"
             | "/s3/list_multipart_uploads"
             | "/s3/presigned_get_object"
+            | "/s3/browser_get_object"
+            | "/s3/browser_open"
             | "/s3/presigned_put_object"
             | "/s3/list_buckets"
             | "/s3/create_bucket"
             | "/s3/head_bucket"
             | "/s3/delete_bucket"
-    ) || path.starts_with("/s3/preview/")
+    ) || path.starts_with("/notifications/")
+        || path.starts_with("/s3/preview/")
 }
 
 fn apply_problem_details(response: &mut Response) {
@@ -777,11 +819,12 @@ mod tests {
                 }
             });
             let state = AppState {
+                database: None,
                 client: HttpClient::new(),
                 settings: Settings {
                     slack_bot_token: String::new(), slack_api_base_url: String::new(),
                     s3_access_key_id: "test".into(), s3_secret_access_key: "test".into(),
-                    s3_region: "us-east-1".into(), s3_endpoint: Some(endpoint),
+                    s3_region: "us-east-1".into(), s3_endpoint: Some(endpoint), s3_browser_endpoint: None,
                     s3_use_path_style: true, s3_session_token: None,
                 },
             };

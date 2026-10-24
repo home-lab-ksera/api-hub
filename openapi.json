@@ -1097,6 +1097,314 @@
           }
         }
       }
+    },
+    "/s3/browser_get_object": {
+      "post": {
+        "operationId": "browserGetObject",
+        "summary": "Issue a 15-minute GET URL for internal viewer media",
+        "description": "Only pdfs/hitomi/*.pdf, *_prev.jpg and pdfs/videos/*.mp4. Uses RUSTFS_S3_BROWSER_ENDPOINT. URL is a bearer capability; response is no-store. Existing internal-network access restriction still applies. No per-user authentication is provided.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "bucket",
+                  "key"
+                ],
+                "properties": {
+                  "bucket": {
+                    "type": "string",
+                    "const": "pdfs"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signed URL; Range is not signed and can vary",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "url",
+                    "method",
+                    "headers"
+                  ],
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "format": "uri"
+                    },
+                    "method": {
+                      "const": "GET"
+                    },
+                    "headers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ProblemDetails"
+          }
+        }
+      }
+    },
+    "/s3/browser_open": {
+      "get": {
+        "operationId": "openBrowserObject",
+        "summary": "Redirect to a newly signed viewer GET URL",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "bucket",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "307": {
+            "description": "Temporary redirect; no-store",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string",
+                  "format": "uri"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ProblemDetails"
+          }
+        }
+      }
+    },
+    "/notifications": {
+      "post": {
+        "operationId": "enqueueNotification",
+        "summary": "Persist a Slack notification",
+        "description": "202 confirms durable acceptance, not Slack delivery. Unique producer/event_id/channel; identical retry returns the same ID. Changed payload conflicts. Requires api_hub migration and a notification worker. Optional file references an image previously persisted in pdfs/hitomi-notifications/. File bytes are not stored in PostgreSQL. File preparation retries before sharing; uncertain share results require manual verification. File IDs are exposed as slack_file_id.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "producer",
+                  "event_id",
+                  "channel",
+                  "text"
+                ],
+                "properties": {
+                  "producer": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "event_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "channel": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16000
+                  },
+                  "file": {
+                    "type": "object",
+                    "required": [
+                      "bucket",
+                      "key",
+                      "name",
+                      "content_type"
+                    ],
+                    "properties": {
+                      "bucket": {
+                        "const": "pdfs"
+                      },
+                      "key": {
+                        "type": "string",
+                        "pattern": "^hitomi-notifications/[a-fA-F0-9]{64}\\.(jpg|png)$"
+                      },
+                      "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128
+                      },
+                      "content_type": {
+                        "type": "string",
+                        "enum": [
+                          "image/jpeg",
+                          "image/png"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Durably accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "sending",
+                        "retry",
+                        "sent",
+                        "uncertain",
+                        "failed"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ProblemDetails"
+          }
+        }
+      }
+    },
+    "/notifications/{id}": {
+      "get": {
+        "operationId": "getNotification",
+        "summary": "Read delivery state",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delivery state, attempts, slack_ts and last_error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "sending",
+                        "retry",
+                        "sent",
+                        "uncertain",
+                        "failed"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ProblemDetails"
+          }
+        }
+      }
+    },
+    "/notifications/{id}/retry": {
+      "post": {
+        "operationId": "retryNotification",
+        "summary": "Manually retry uncertain or failed delivery",
+        "description": "Verify Slack before retrying uncertain results; the previous send may have succeeded. Sent/pending/sending notifications cannot be retried here.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Reset to pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "sending",
+                        "retry",
+                        "sent",
+                        "uncertain",
+                        "failed"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/ProblemDetails"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1495,6 +1803,13 @@
               "string",
               "null"
             ]
+          },
+          "continuation_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque token returned by the previous page. Takes precedence over start_after."
           }
         },
         "required": [
