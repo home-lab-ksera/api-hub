@@ -179,6 +179,7 @@ mod tests {
             requests
         });
         let state = AppState {
+            database: None,
             client: HttpClient::new(),
             settings: Settings {
                 slack_bot_token: String::new(),
@@ -187,6 +188,7 @@ mod tests {
                 s3_secret_access_key: "test".into(),
                 s3_region: "us-east-1".into(),
                 s3_endpoint: Some(endpoint),
+                s3_browser_endpoint: None,
                 s3_use_path_style: true,
                 s3_session_token: None,
             },

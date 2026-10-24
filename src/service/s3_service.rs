@@ -174,6 +174,7 @@ pub struct ListObjectsV2Input {
     pub delimiter: Option<String>,
     pub max_keys: Option<i32>,
     pub start_after: Option<String>,
+    pub continuation_token: Option<String>,
 }
 
 pub struct CreateMultipartUploadInput {
@@ -373,6 +374,9 @@ pub async fn head_object(
         .build_request()
         .map_err(map_s3_input_error_to_api_error)?;
     let response = execute_s3(http_client, request).await?;
+    if response.status_code == 404 {
+        return Err(ApiError::NotFound("S3 object not found".into()));
+    }
     let output = shiguredo_s3::api::HeadObjectFluentBuilder::parse_response(&response)
         .map_err(map_s3_runtime_error_to_api_error)?;
 
@@ -491,7 +495,9 @@ pub async fn list_objects_v2(
     if let Some(max_keys) = input.max_keys {
         req = req.max_keys(max_keys);
     }
-    if let Some(start_after) = input.start_after {
+    if let Some(token) = input.continuation_token {
+        req = req.continuation_token(token);
+    } else if let Some(start_after) = input.start_after {
         req = req.start_after(start_after);
     }
 

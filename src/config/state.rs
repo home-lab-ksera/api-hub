@@ -5,4 +5,5 @@ use crate::http_client::HttpClient;
 pub struct AppState {
     pub settings: Settings,
     pub client: HttpClient,
+    pub database: Option<sqlx::PgPool>,
 }

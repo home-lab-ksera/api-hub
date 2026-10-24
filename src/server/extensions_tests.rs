@@ -35,6 +35,7 @@ async fn upstream(replies: Vec<(u16, &'static str)>) -> (AppState, JoinHandle<Ve
         }).await.unwrap()
     });
     let state = AppState {
+        database: None,
         client: HttpClient::new(),
         settings: Settings {
             slack_bot_token: "test-token".into(),
@@ -43,6 +44,7 @@ async fn upstream(replies: Vec<(u16, &'static str)>) -> (AppState, JoinHandle<Ve
             s3_secret_access_key: "test".into(),
             s3_region: "us-east-1".into(),
             s3_endpoint: Some(endpoint),
+            s3_browser_endpoint: None,
             s3_use_path_style: true,
             s3_session_token: None,
         },
@@ -65,6 +67,100 @@ async fn post(state: &AppState, path: &str, body: &str) -> Response {
 fn string_member(body: &[u8], name: &str) -> String {
     let json = nojson::RawJson::parse(std::str::from_utf8(body).unwrap()).unwrap();
     String::try_from(json.value().to_member(name).unwrap().required().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn browser_signing_is_scoped_and_uses_external_host() {
+    let (mut state, task) = upstream(vec![]).await;
+    state.settings.s3_browser_endpoint = Some("https://s3.internal.example".into());
+    for key in [
+        "hitomi/20261024/001.pdf",
+        "hitomi/20261024/001_prev.jpg",
+        "videos/20261024/source/001.mp4",
+    ] {
+        let body =
+            serde_json::json!({"bucket":"pdfs","key":key,"expires_in_secs":604800}).to_string();
+        let response = post(&state, "/s3/browser_get_object", &body).await;
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.get_header("cache-control"), Some("no-store"));
+        let url = url::Url::parse(&string_member(&response.body, "url")).unwrap();
+        assert_eq!(url.host_str(), Some("s3.internal.example"));
+        assert_eq!(
+            url.query_pairs()
+                .find(|(k, _)| k == "X-Amz-Expires")
+                .unwrap()
+                .1,
+            "900"
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(k, _)| k == "X-Amz-SignedHeaders")
+                .unwrap()
+                .1,
+            "host"
+        );
+    }
+    for (bucket, key) in [
+        ("private", "hitomi/test.pdf"),
+        ("pdfs", "backup/test.pdf"),
+        ("pdfs", "hitomi/../private.pdf"),
+        ("pdfs", "videos/a.txt"),
+    ] {
+        let body = serde_json::json!({"bucket":bucket,"key":key}).to_string();
+        assert_eq!(
+            post(&state, "/s3/browser_get_object", &body)
+                .await
+                .status_code,
+            400
+        );
+    }
+    state.settings.s3_browser_endpoint = None;
+    assert_eq!(
+        post(
+            &state,
+            "/s3/browser_get_object",
+            r#"{"bucket":"pdfs","key":"hitomi/test.pdf"}"#
+        )
+        .await
+        .status_code,
+        503
+    );
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn list_objects_forwards_opaque_token_to_s3() {
+    let (state, task) = upstream(vec![
+        (200, "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>a+/=</NextContinuationToken><Contents><Key>first.pdf</Key></Contents></ListBucketResult>"),
+        (200, "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>second.pdf</Key></Contents></ListBucketResult>"),
+    ]).await;
+    let first = post(
+        &state,
+        "/s3/list_objects_v2",
+        r#"{"bucket":"pdfs","max_keys":100}"#,
+    )
+    .await;
+    assert_eq!(first.status_code, 200);
+    assert_eq!(
+        string_member(&first.body, "next_continuation_token"),
+        "a+/="
+    );
+    let second = post(
+        &state,
+        "/s3/list_objects_v2",
+        r#"{"bucket":"pdfs","max_keys":100,"continuation_token":"a+/=","start_after":"ignored"}"#,
+    )
+    .await;
+    assert_eq!(second.status_code, 200);
+    assert!(
+        std::str::from_utf8(&second.body)
+            .unwrap()
+            .contains("second.pdf")
+    );
+    let requests = task.await.unwrap();
+    assert!(!requests[0].uri.contains("continuation-token="));
+    assert!(requests[1].uri.contains("continuation-token=a%2B%2F%3D"));
+    assert!(!requests[1].uri.contains("start-after="));
 }
 
 #[tokio::test]

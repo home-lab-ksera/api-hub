@@ -60,6 +60,7 @@ pub struct ListObjectsV2Request {
     pub delimiter: Option<String>,
     pub max_keys: Option<i32>,
     pub start_after: Option<String>,
+    pub continuation_token: Option<String>,
 }
 
 pub struct CreateMultipartUploadRequest {
@@ -298,6 +299,7 @@ fn parse_list_objects_v2_request(body: &str) -> Result<ListObjectsV2Request, Api
         delimiter: get_optional_string(root, "delimiter")?,
         max_keys: get_optional_i32(root, "max_keys")?,
         start_after: get_optional_string(root, "start_after")?,
+        continuation_token: get_optional_string(root, "continuation_token")?,
     })
 }
 
@@ -520,6 +522,7 @@ pub async fn list_objects_v2(app_state: &AppState, body: &[u8]) -> Result<Respon
             delimiter: payload.delimiter,
             max_keys: payload.max_keys,
             start_after: payload.start_after,
+            continuation_token: payload.continuation_token,
         },
     )
     .await?;
@@ -664,6 +667,54 @@ pub async fn presigned_get_object(app_state: &AppState, body: &[u8]) -> Result<R
         },
     )?;
     Ok(json_response(result))
+}
+
+/// 内部viewer専用。通常のS3 APIとは別に、公開する保存領域と署名期限を固定する。
+pub async fn browser_get_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+    let payload = parse_get_object_request(&body_to_utf8(body)?)?;
+    let allowed = payload.bucket == "pdfs"
+        && ((payload.key.starts_with("hitomi/")
+            && (payload.key.ends_with(".pdf") || payload.key.ends_with("_prev.jpg")))
+            || (payload.key.starts_with("videos/") && payload.key.ends_with(".mp4")))
+        && !payload
+            .key
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        && !payload.key.contains(['\\', '\r', '\n']);
+    if !allowed {
+        return Err(ApiError::BadRequest(
+            "Object is outside the viewer media area".into(),
+        ));
+    }
+    let Some(endpoint) = &app_state.settings.s3_browser_endpoint else {
+        return Ok(Response::new(503, "Service Unavailable").header("Cache-Control", "no-store"));
+    };
+    let parsed = url::Url::parse(endpoint)
+        .map_err(|_| ApiError::InternalServerError("Invalid browser S3 endpoint".into()))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || parsed.path() != "/"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ApiError::InternalServerError(
+            "Browser S3 endpoint must be an HTTPS origin".into(),
+        ));
+    }
+    let mut settings = app_state.settings.clone();
+    settings.s3_endpoint = Some(endpoint.trim_end_matches('/').to_string());
+    settings.s3_use_path_style = true;
+    let result = s3_service::presigned_get(
+        &settings,
+        PresignedObjectInput {
+            bucket: payload.bucket,
+            key: payload.key,
+            expires_in_secs: 900,
+        },
+    )?;
+    Ok(json_response(result).header("Cache-Control", "no-store"))
 }
 
 pub async fn presigned_put_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {

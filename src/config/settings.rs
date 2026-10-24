@@ -8,6 +8,7 @@ pub struct Settings {
     pub s3_secret_access_key: String,
     pub s3_region: String,
     pub s3_endpoint: Option<String>,
+    pub s3_browser_endpoint: Option<String>,
     pub s3_use_path_style: bool,
     pub s3_session_token: Option<String>,
 }
@@ -56,6 +57,9 @@ impl Settings {
             s3_secret_access_key,
             s3_region,
             s3_endpoint,
+            s3_browser_endpoint: env::var("RUSTFS_S3_BROWSER_ENDPOINT")
+                .ok()
+                .filter(|value| !value.is_empty()),
             s3_use_path_style,
             s3_session_token,
         })

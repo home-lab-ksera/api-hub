@@ -88,12 +88,15 @@ impl ApiError {
 pub fn reason_phrase(status_code: u16) -> &'static str {
     match status_code {
         200 => "OK",
+        202 => "Accepted",
         204 => "No Content",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
+        503 => "Service Unavailable",
         _ => "Unknown Error",
     }
 }
