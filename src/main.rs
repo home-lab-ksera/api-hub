@@ -22,8 +22,8 @@ async fn main() {
     );
 
     let mode = std::env::args().nth(1).unwrap_or_default();
-    if !["", "--migrate", "--notification-worker"].contains(&mode.as_str()) {
-        eprintln!("Usage: api-hub [--migrate|--notification-worker]");
+    if !["", "--migrate", "--notification-worker", "--serve"].contains(&mode.as_str()) {
+        eprintln!("Usage: api-hub [--serve|--migrate|--notification-worker]");
         std::process::exit(2);
     }
     let database = if mode != ""
@@ -71,7 +71,9 @@ async fn main() {
         database,
     };
     if mode == "--notification-worker" {
+        let pool = app_state.database.clone().unwrap();
         api_hub::notifications::worker(app_state, shutdown_signal()).await;
+        pool.close().await;
         return;
     }
 
@@ -101,39 +103,30 @@ async fn main() {
         "Server successfully bound to address"
     );
 
-    if let Err(error) = server::serve(listener, app_state.clone(), shutdown_signal()).await {
-        error!(%error,"HTTP server failed");
-    }
-    if let Some(pool) = app_state.database {
-        pool.close().await;
+    let result = if mode == "--serve" {
+        server::serve_integrated(listener, app_state, shutdown_signal()).await
+    } else {
+        // 旧worker停止までの切替互換。通常起動への統合はP6で行う。
+        let result = server::serve(listener, app_state.clone(), shutdown_signal()).await;
+        if let Some(pool) = app_state.database {
+            pool.close().await;
+        }
+        result
+    };
+    if let Err(error) = result {
+        error!(%error,"Server process failed");
+        std::process::exit(1);
     }
     info!("Server shutdown complete");
 }
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {
-            info!(signal = "SIGINT", "Received shutdown signal");
-        },
-        _ = terminate => {
-            info!(signal = "SIGTERM", "Received shutdown signal");
-        },
+fn shutdown_signal() -> impl std::future::Future<Output = ()> + Send + 'static {
+    // task起動前にUnix signal handlerを登録し、初回claimと登録を競合させない。
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .expect("failed to install SIGINT handler");
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    async move {
+        tokio::select! { _=interrupt.recv()=>{},_=terminate.recv()=>{} }
     }
 }

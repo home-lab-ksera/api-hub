@@ -25,7 +25,7 @@ base64 = "0.22.1"
 nojson = "0.3.9"
 shiguredo_http11 = "2026.1.1"
 shiguredo_s3 = "2026.1.0-canary.0"
-tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "signal", "net", "io-util", "time", "fs"] }
+tokio = { version = "1.44.0", features = ["macros", "rt-multi-thread", "signal", "net", "io-util", "time", "fs", "sync"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", default-features = false, features = ["json", "env-filter", "fmt"] }
 
