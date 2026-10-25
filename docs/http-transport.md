@@ -8,6 +8,8 @@ S3 uploadは8MiBずつmultipart化し、previewはreqwest body streamからaxum 
 
 SIGTERMは新規受付を停止し、既存要求を最大80秒待つ。Pod猶予90秒を指定する。強制停止時も呼出元cameraのspool/固定keyを保持して再送できる。完了不明な通知は従来のuncertainとして扱い、HTTP層は再送しない。
 
-検証: `cargo test --locked --all-targets`、隔離DBのnotifications、`python3 scripts/check-stream-memory.py target/debug/api-hub`。memory fixtureは本番へ接続せず、64MiBと256MiBのupload/downloadで/procのVmHWMを比較する。デバッグbinaryの実測uploadは58,128/66,112KiB、downloadは18,344/17,812KiBで、fileサイズに比例しない。
+検証: `cargo test --locked --all-targets`、隔離DBのnotifications、`cargo build --locked --example http_fixture`の後に`python3 scripts/check-stream-memory.py target/debug/examples/http_fixture`。memory fixtureは本番へ接続せず、64MiBと256MiBのupload/downloadで/procのVmHWMを比較する。デバッグbinaryの実測uploadは58,128/66,112KiB、downloadは18,344/17,812KiBで、fileサイズに比例しない。
 
 公開workflowは同一commitのAPI/stream/通知回復/memory fixtureの成功を要求する。Nixのstatic・CA・非root・x86-64 CPU設定は維持する。
+
+HTTP fixture exampleは隔離試験専用で配布imageに含めない。通常CLIのAPI専用起動modeは持たない。

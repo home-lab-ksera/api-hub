@@ -1,9 +1,8 @@
 # DBと通知配送
 
-`--migrate` はapi_hub DBのSQLx migrationだけを実行する。`--notification-worker` は1 workerで配送を行う。引数なしは既存HTTP API。
-PGDATABASE/DATABASE_URLを設定しなければ従来のS3/Slack APIだけで動く。DB接続はlazyで、DB一時停止時もS3 APIの起動を妨げない。
+`--migrate`はapi_hub DBのSQLx migrationだけを実行する。通常起動（引数なし/`--serve`）はHTTP APIと1本の通知配送taskを同じprocessで動かす。DB設定は必須だが接続はlazyで、一時停止時もS3 APIの起動を妨げない。
 
-本番接続はPGHOST/PGDATABASE/PGPASSWORD/PGSSLROOTCERT、PGUSER=app。verify-fullを強制し、poolはAPI 3/worker 2/migration 1を配備側で設定する。
+本番接続はPGHOST/PGDATABASE/PGPASSWORD/PGSSLROOTCERT、PGUSER=app。verify-fullを強制し、poolはAPI/配送共有3、migration 1を配備側で設定する。
 DATABASE_URLは隔離テスト用にも利用できる。
 
 `POST /notifications` はproducer/event_id/channel/textを永続化して202を返す。同じ識別子と同じpayloadは同じIDとなり、payloadの変更は409。
@@ -38,12 +37,12 @@ SQLとpoolの取得は合わせて3秒以内。DB未設定・停止・schema未�
 
 通知producerのhitomiは有効な202の受領で受付完了とし、accepted後に配送状態を継続GETしない。配送失敗・uncertainはこのapi-hubの監視と手動retryが管理する。hitomiに残る旧履歴のapi_idは移行時だけ一度identityを照合する。
 
-## P5の統合起動
+## 起動・終了と復元
 
-準備imageの`--serve`はAPIと1本の配送taskを同じprocessで起動し、3接続のPgPoolを共有する。引数なしAPI専用と旧`--notification-worker`は切替時の暫定互換で、P6で撤去する。migrationは設定読込・HTTP受付・配送を開始せず終了する。
+APIと1本の配送taskは上限3接続のPgPoolを共有する。migrationは設定読込・HTTP受付・配送を開始せず終了する。旧worker専用起動とAPI専用互換modeは廃止した。
 
 一時的なDB/S3/Slack障害は既存workerの再試行と監視で扱う。workerの予期しない終了/panicではAPIも停止し、processを異常終了する。SIGTERMは新規受付・新規claimを止め、API最大80秒・通知最大75秒の進行分を待ち、最後に共有poolを閉じる。Pod猶予は90秒。
 
-切替は旧workerを0 replicaにするGitOps変更を先に配備し、Pod終了とsending/uncertainを確認してから、別の変更でAPIを`--serve`/Recreate/1 replicaへ切り替える。同一sync内のDeployment更新順序には依存しない。逆戻しは統合workerを先に停止し、API専用へ戻した後に旧workerを再開する。冪等キーを保持し、sending/uncertainを一括pendingへ戻さない。
+DB復元後の再送・重複を許容し、統合processの通常起動で配送を再開できる。Slackとの事前照合を再開条件にせず、復元目的のAPI専用modeや配送停止設定を持たない。通常の冪等受付とuncertain手動対応は維持する。
 
-個人サーバーのDB復元後は再送・重複を許容し、統合processを起動して配送を再開できる。Slackとの事前照合を再開条件にせず、この目的だけのAPI専用modeや配送停止設定は最終構成へ残さない。通常のuncertain手動対応は維持する。
+旧imageへの切戻しでは統合processを先に停止し、API専用へ戻した後に旧workerを再開する。逆順で二重workerを作らず、sending/uncertainを一括pendingへ戻さない。

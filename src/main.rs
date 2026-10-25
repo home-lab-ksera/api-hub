@@ -21,30 +21,33 @@ async fn main() {
         "Starting application"
     );
 
-    let mode = std::env::args().nth(1).unwrap_or_default();
-    if !["", "--migrate", "--notification-worker", "--serve"].contains(&mode.as_str()) {
-        eprintln!("Usage: api-hub [--serve|--migrate|--notification-worker]");
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.len() > 1
+        || args
+            .first()
+            .is_some_and(|arg| !["--serve", "--migrate"].contains(&arg.as_str()))
+    {
+        eprintln!("Usage: api-hub [--serve|--migrate]");
         std::process::exit(2);
     }
-    let database = if mode != ""
-        || std::env::var_os("PGDATABASE").is_some()
-        || std::env::var_os("DATABASE_URL").is_some()
-    {
-        match api_hub::database::connect().await {
-            Ok(pool) => Some(pool),
-            Err(error) => {
-                error!(%error, "Database connection failed");
-                std::process::exit(1);
-            }
+    let mode = args.first().map(String::as_str).unwrap_or("--serve");
+    if std::env::var_os("PGDATABASE").is_none() && std::env::var_os("DATABASE_URL").is_none() {
+        error!("PGDATABASE or DATABASE_URL is required");
+        std::process::exit(1);
+    }
+    let database = match api_hub::database::connect().await {
+        Ok(pool) => pool,
+        Err(error) => {
+            error!(%error,"Database connection failed");
+            std::process::exit(1);
         }
-    } else {
-        None
     };
     if mode == "--migrate" {
-        if let Err(error) = api_hub::database::migrate(database.as_ref().unwrap()).await {
+        if let Err(error) = api_hub::database::migrate(&database).await {
             error!(%error, "Database migration failed");
             std::process::exit(1);
         }
+        database.close().await;
         return;
     }
 
@@ -68,15 +71,8 @@ async fn main() {
     let app_state = config::state::AppState {
         settings,
         client,
-        database,
+        database: Some(database),
     };
-    if mode == "--notification-worker" {
-        let pool = app_state.database.clone().unwrap();
-        api_hub::notifications::worker(app_state, shutdown_signal()).await;
-        pool.close().await;
-        return;
-    }
-
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
 
     info!(
@@ -103,16 +99,7 @@ async fn main() {
         "Server successfully bound to address"
     );
 
-    let result = if mode == "--serve" {
-        server::serve_integrated(listener, app_state, shutdown_signal()).await
-    } else {
-        // 旧worker停止までの切替互換。通常起動への統合はP6で行う。
-        let result = server::serve(listener, app_state.clone(), shutdown_signal()).await;
-        if let Some(pool) = app_state.database {
-            pool.close().await;
-        }
-        result
-    };
+    let result = server::serve_integrated(listener, app_state, shutdown_signal()).await;
     if let Err(error) = result {
         error!(%error,"Server process failed");
         std::process::exit(1);
