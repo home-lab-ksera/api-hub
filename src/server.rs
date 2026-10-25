@@ -2,192 +2,143 @@ use crate::config::state::AppState;
 use crate::errors::api_error::{ApiError, reason_phrase};
 use crate::handlers::{health_handler, openapi_handler, s3_handler, slack_handler};
 use crate::request_id;
-use shiguredo_http11::uri::percent_decode;
-use shiguredo_http11::{BodyProgress, DecoderLimits, Request, RequestDecoder, Response};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use shiguredo_http11::{Request, Response, uri::percent_decode};
 use tracing::{Instrument, debug, error, info, info_span, warn};
-
 const S3_CORS_ALLOWED_ORIGIN: &str = "https://hitomi-upload-viewer.internal.qroksera.com";
 
-pub async fn handle_connection(mut stream: TcpStream, app_state: AppState) {
-    if let Err(error) = stream.set_nodelay(true) {
-        warn!(%error, "Failed to enable TCP_NODELAY");
-    }
-    let mut decoder = request_decoder();
-    let mut buffer = vec![0_u8; 8192];
+pub fn router(state: AppState) -> axum::Router {
+    axum::Router::new()
+        .route("/s3/put_object_stream", axum::routing::any(handle_http))
+        .route("/s3/preview/{*key}", axum::routing::any(handle_http))
+        .fallback(handle_http)
+        .with_state(state)
+}
 
-    loop {
-        let request = loop {
-            match decoder.decode_headers() {
-                Ok(Some((head, _))) => {
-                    break Request {
-                        method: head.method,
-                        uri: head.uri,
-                        version: head.version,
-                        headers: head.headers,
-                        body: Vec::new(),
-                    };
-                }
-                Ok(None) => {
-                    let n = match stream.read(&mut buffer).await {
-                        Ok(n) => n,
-                        Err(e) => {
-                            error!(error = %e, "Failed to read from socket");
-                            return;
-                        }
-                    };
-                    if n == 0 {
-                        return;
-                    }
-                    if let Err(e) = decoder.feed(&buffer[..n]) {
-                        let response = ApiError::BadRequest(format!("Invalid HTTP request: {e}"))
-                            .into_response();
-                        let _ = write_response(&mut stream, response).await;
-                        return;
-                    }
-                }
-                Err(e) => {
-                    let response =
-                        ApiError::BadRequest(format!("Invalid HTTP request: {e}")).into_response();
-                    let _ = write_response(&mut stream, response).await;
-                    return;
-                }
-            }
-        };
-
-        let keep_alive = request.is_keep_alive();
-
-        if request.method == "POST" && split_uri(&request.uri).0 == "/s3/put_object_stream" {
-            let request_id = request
-                .get_header("x-request-id")
-                .map(str::to_owned)
-                .unwrap_or_else(request_id::generate_request_id);
-            let start = std::time::Instant::now();
-            let result =
-                crate::s3_upload::upload(&mut stream, &mut decoder, &request, &app_state).await;
-            let failed = result.is_err();
-            if let Err(error) = &result {
-                warn!(%error, request_id = %request_id, "Streaming upload failed");
-            }
-            let mut response = result.unwrap_or_else(ApiError::into_response);
-            apply_problem_details(&mut response);
-            apply_s3_cors("/s3/put_object_stream", &request, &mut response);
-            response.add_header("x-request-id", &request_id);
-            info!(operation = "s3_stream_upload", status = response.status_code,
-                latency_ms = start.elapsed().as_millis() as u64, request_id = %request_id);
-            // On errors the request body may not have been consumed.
-            if failed || !keep_alive {
-                response.add_header("Connection", "close");
-            }
-            if write_response(&mut stream, response).await.is_err() || failed || !keep_alive {
-                return;
-            }
-            continue;
-        }
-
-        let mut request = request;
-        loop {
-            match read_body_chunk(&mut stream, &mut decoder).await {
-                Ok(Some(chunk)) => request.body.extend_from_slice(&chunk),
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = write_response(&mut stream, error.into_response()).await;
-                    return;
-                }
-            }
-        }
-
-        if is_preview_get(&request) {
-            if write_preview_stream_response(&mut stream, request, &app_state, keep_alive)
-                .await
-                .is_err()
-            {
-                return;
-            }
-            if !keep_alive {
-                return;
-            }
-            continue;
-        }
-
-        let mut response = process_request(request, &app_state).await;
-
-        if !keep_alive {
-            response.add_header("Connection", "close");
-        }
-
-        if write_response(&mut stream, response).await.is_err() {
-            return;
-        }
-        if !keep_alive {
-            return;
-        }
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    state: AppState,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    use std::future::IntoFuture;
+    let (stopped, waiting) = tokio::sync::oneshot::channel();
+    let serve = axum::serve(listener, router(state))
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            let _ = stopped.send(());
+        })
+        .into_future();
+    tokio::pin!(serve);
+    tokio::select! {
+        result=&mut serve=>result,
+        _=waiting=>tokio::time::timeout(std::time::Duration::from_secs(80),&mut serve).await
+            .unwrap_or_else(|_|Err(std::io::Error::new(std::io::ErrorKind::TimedOut,"HTTP drain deadline exceeded"))),
     }
 }
 
-pub(crate) async fn read_body_chunk(
-    stream: &mut TcpStream,
-    decoder: &mut RequestDecoder,
-) -> Result<Option<Vec<u8>>, ApiError> {
-    loop {
-        if let Some(data) = decoder.peek_body().filter(|data| !data.is_empty()) {
-            let chunk = data.to_vec();
-            decoder
-                .consume_body(chunk.len())
-                .map_err(|e| ApiError::BadRequest(format!("Invalid HTTP body: {e}")))?;
-            return Ok(Some(chunk));
+async fn handle_http(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{HeaderName, HeaderValue, StatusCode},
+    };
+    let (parts, body) = request.into_parts();
+    let mut metadata = Request::new(parts.method.as_str(), &parts.uri.to_string());
+    for (name, value) in &parts.headers {
+        if let Ok(value) = value.to_str() {
+            metadata.add_header(name.as_str(), value);
         }
-        let buffered_before = decoder.remaining().len();
-        if matches!(
-            decoder
-                .progress()
-                .map_err(|e| ApiError::BadRequest(format!("Invalid HTTP body: {e}")))?,
-            BodyProgress::Complete { .. }
-        ) {
-            return Ok(None);
-        }
-        // progress() may have exposed chunk data already buffered by the decoder.
-        if decoder.remaining().len() != buffered_before
-            || decoder.peek_body().is_some_and(|data| !data.is_empty())
-        {
-            continue;
-        }
-        let mut buffer = [0; 8192];
-        let n = stream
-            .read(&mut buffer)
+    }
+    let path = parts.uri.path();
+    let id = metadata
+        .get_header("x-request-id")
+        .map(str::to_owned)
+        .unwrap_or_else(request_id::generate_request_id);
+    let result = if parts.method == axum::http::Method::POST && path == "/s3/put_object_stream" {
+        crate::s3_upload::upload(body, &metadata, &state)
             .await
-            .map_err(|e| ApiError::BadRequest(format!("Failed to read HTTP body: {e}")))?;
-        if n == 0 {
-            return Err(ApiError::BadRequest("Incomplete HTTP body".into()));
+            .map(|r| (r, None))
+    } else if parts.method == axum::http::Method::GET && path.starts_with("/s3/preview/") {
+        match parse_preview_bucket_and_key(path) {
+            Ok((bucket, key)) => {
+                s3_handler::preview_object_stream(&state, bucket, key, &metadata.headers)
+                    .await
+                    .map(|reply| {
+                        let mut head = Response::new(reply.status_code, reply.reason_phrase);
+                        for (name, value) in reply.headers {
+                            head.add_header(&name, &value);
+                        }
+                        // reqwest/axumのbackpressureで全量を保持せず転送する。
+                        let stream = reply.body_stream.bytes_stream();
+                        (head, Some(Body::from_stream(stream)))
+                    })
+            }
+            Err(error) => Err(error),
         }
-        decoder
-            .feed(&buffer[..n])
-            .map_err(|e| ApiError::BadRequest(format!("Invalid HTTP body: {e}")))?;
+    } else {
+        let limit = if path.contains("base64") || path.starts_with("/slack/upload/") {
+            64 * 1024 * 1024
+        } else {
+            1024 * 1024
+        };
+        match tokio::time::timeout(std::time::Duration::from_secs(60), to_bytes(body, limit)).await
+        {
+            Ok(Ok(bytes)) => {
+                metadata.body = bytes.to_vec();
+                Ok((process_request(metadata.clone(), &state).await, None))
+            }
+            Ok(Err(error)) => {
+                use std::error::Error as _;
+                let too_large = error
+                    .source()
+                    .is_some_and(|source| source.is::<http_body_util::LengthLimitError>());
+                Ok((
+                    crate::errors::api_error::problem_details_response(
+                        if too_large { 413 } else { 400 },
+                        "Request body is incomplete or too large",
+                    ),
+                    None,
+                ))
+            }
+            Err(_) => Ok((
+                crate::errors::api_error::problem_details_response(408, "Request body timed out"),
+                None,
+            )),
+        }
+    };
+    let (mut head, stream) = result.unwrap_or_else(|error| (error.into_response(), None));
+    if stream.is_none() {
+        apply_problem_details(&mut head);
     }
+    if !head.has_header("Access-Control-Allow-Origin") {
+        apply_s3_cors(path, &metadata, &mut head);
+    }
+    if !head.has_header("x-request-id") {
+        head.add_header("x-request-id", &id);
+    }
+    let mut response =
+        axum::response::Response::new(stream.unwrap_or_else(|| Body::from(head.body)));
+    *response.status_mut() =
+        StatusCode::from_u16(head.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    for (name, value) in head.headers {
+        if let (Ok(name), Ok(value)) = (name.parse::<HeaderName>(), value.parse::<HeaderValue>()) {
+            response.headers_mut().append(name, value);
+        }
+    }
+    response
 }
 
-fn request_decoder() -> RequestDecoder {
-    // Accept uploads of any size, retaining the HTTP header and framing limits.
-    RequestDecoder::with_limits(DecoderLimits {
-        max_body_size: usize::MAX,
-        max_buffer_size: usize::MAX,
-        ..DecoderLimits::default()
-    })
+// raw HTTP fixtureも本番と同じRouterを使う。wire処理はHyperへ任せる。
+#[cfg(test)]
+pub(crate) async fn handle_connection(stream: tokio::net::TcpStream, state: AppState) {
+    let io = hyper_util::rt::TokioIo::new(stream);
+    let service = hyper_util::service::TowerToHyperService::new(router(state));
+    let _ = hyper::server::conn::http1::Builder::new()
+        .half_close(true)
+        .serve_connection(io, service)
+        .await;
 }
-
-async fn write_response(stream: &mut TcpStream, response: Response) -> std::io::Result<()> {
-    let encoded = response.encode();
-
-    stream.write_all(&encoded).await?;
-    stream.flush().await
-}
-
-fn is_preview_get(request: &Request) -> bool {
-    let (path, _) = split_uri(&request.uri);
-    request.method == "GET" && path.starts_with("/s3/preview/")
-}
-
 fn parse_preview_bucket_and_key(path: &str) -> Result<(String, String), ApiError> {
     let remaining = &path["/s3/preview/".len()..];
     let (bucket, key) = remaining
@@ -202,210 +153,6 @@ fn parse_preview_bucket_and_key(path: &str) -> Result<(String, String), ApiError
     let decoded_key = percent_decode(key)
         .map_err(|_| ApiError::BadRequest("Invalid preview path".to_string()))?;
     Ok((decoded_bucket, decoded_key))
-}
-
-async fn write_preview_stream_response(
-    stream: &mut TcpStream,
-    request: Request,
-    app_state: &AppState,
-    keep_alive: bool,
-) -> std::io::Result<()> {
-    let (path, query) = split_uri(&request.uri);
-    let path = path.to_string();
-    let query = query.map(ToString::to_string);
-    let request_id = request
-        .get_header("x-request-id")
-        .map(ToString::to_string)
-        .unwrap_or_else(request_id::generate_request_id);
-    let method = request.method.clone();
-    let user_agent = request.get_header("user-agent").map(ToString::to_string);
-    let client_ip = request
-        .get_header("x-forwarded-for")
-        .map(ToString::to_string)
-        .or_else(|| request.get_header("x-real-ip").map(ToString::to_string));
-
-    info!(
-        target: "http::request",
-        request_id = %request_id,
-        method = %method,
-        path = %path,
-        query = ?query,
-        user_agent = ?user_agent,
-        client_ip = ?client_ip,
-        "Incoming request"
-    );
-
-    let start = std::time::Instant::now();
-
-    let result = async {
-        let (bucket, key) = parse_preview_bucket_and_key(&path)?;
-        s3_handler::preview_object_stream(app_state, bucket, key, request.headers.as_slice()).await
-    }
-    .await;
-
-    match result {
-        Ok(mut stream_response) => {
-            let upstream_headers_ms = start.elapsed().as_millis() as u64;
-            let mut head =
-                Response::new(stream_response.status_code, stream_response.reason_phrase)
-                    .omit_body(true);
-            for (name, value) in &stream_response.headers {
-                head.add_header(name, value);
-            }
-            apply_s3_cors(&path, &request, &mut head);
-            if !head.has_header("x-request-id") {
-                head.add_header("x-request-id", &request_id);
-            }
-            if !keep_alive {
-                head.add_header("Connection", "close");
-            }
-
-            let encoded_head = head.encode();
-            stream.write_all(&encoded_head).await?;
-
-            let transfer_start = std::time::Instant::now();
-            let mut bytes_sent = 0_u64;
-            let mut chunk = vec![0_u8; 64 * 1024];
-            loop {
-                let n = stream_response
-                    .body_stream
-                    .read_chunk(&mut chunk)
-                    .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))?;
-                if n == 0 {
-                    break;
-                }
-                stream.write_all(&chunk[..n]).await?;
-                bytes_sent += n as u64;
-            }
-            stream.flush().await?;
-
-            let latency_ms = start.elapsed().as_millis() as u64;
-            info!(
-                target: "s3::download",
-                request_id = %request_id,
-                status = stream_response.status_code,
-                upstream_headers_ms,
-                transfer_ms = transfer_start.elapsed().as_millis() as u64,
-                bytes_sent,
-                "Download transfer completed"
-            );
-            match stream_response.status_code {
-                200..=299 => info!(
-                    target: "http::response",
-                    request_id = %request_id,
-                    method = %method,
-                    path = %path,
-                    status = stream_response.status_code,
-                    latency_ms,
-                    "Request completed"
-                ),
-                300..=399 => info!(
-                    target: "http::response",
-                    request_id = %request_id,
-                    method = %method,
-                    path = %path,
-                    status = stream_response.status_code,
-                    latency_ms,
-                    "Request redirected"
-                ),
-                400..=499 => warn!(
-                    target: "http::response",
-                    request_id = %request_id,
-                    method = %method,
-                    path = %path,
-                    status = stream_response.status_code,
-                    latency_ms,
-                    "Client error"
-                ),
-                500..=599 => error!(
-                    target: "http::response",
-                    request_id = %request_id,
-                    method = %method,
-                    path = %path,
-                    status = stream_response.status_code,
-                    latency_ms,
-                    "Server error"
-                ),
-                _ => debug!(
-                    target: "http::response",
-                    request_id = %request_id,
-                    method = %method,
-                    path = %path,
-                    status = stream_response.status_code,
-                    latency_ms,
-                    "Unexpected status"
-                ),
-            }
-
-            Ok(())
-        }
-        Err(error) => {
-            let mut response = error.into_response();
-            apply_problem_details(&mut response);
-            apply_s3_cors(&path, &request, &mut response);
-            if !response.has_header("x-request-id") {
-                response.add_header("x-request-id", &request_id);
-            }
-            if !keep_alive {
-                response.add_header("Connection", "close");
-            }
-
-            let status = response.status_code;
-            write_response(stream, response).await?;
-
-            let latency_ms = start.elapsed().as_millis() as u64;
-            match status {
-                200..=299 => info!(
-                    target: "http::response",
-                    request_id = %request_id,
-                    method = %method,
-                    path = %path,
-                    status,
-                    latency_ms,
-                    "Request completed"
-                ),
-                300..=399 => info!(
-                    target: "http::response",
-                    request_id = %request_id,
-                    method = %method,
-                    path = %path,
-                    status,
-                    latency_ms,
-                    "Request redirected"
-                ),
-                400..=499 => warn!(
-                    target: "http::response",
-                    request_id = %request_id,
-                    method = %method,
-                    path = %path,
-                    status,
-                    latency_ms,
-                    "Client error"
-                ),
-                500..=599 => error!(
-                    target: "http::response",
-                    request_id = %request_id,
-                    method = %method,
-                    path = %path,
-                    status,
-                    latency_ms,
-                    "Server error"
-                ),
-                _ => debug!(
-                    target: "http::response",
-                    request_id = %request_id,
-                    method = %method,
-                    path = %path,
-                    status,
-                    latency_ms,
-                    "Unexpected status"
-                ),
-            }
-
-            Ok(())
-        }
-    }
 }
 
 async fn process_request(request: Request, app_state: &AppState) -> Response {
@@ -453,10 +200,11 @@ async fn process_request(request: Request, app_state: &AppState) -> Response {
         );
 
         let start = std::time::Instant::now();
-        let mut response = match route_request(&request, app_state, &path, query.as_deref()).await {
-            Ok(response) => response,
-            Err(error) => error.into_response(),
-        };
+        let mut response =
+            match Box::pin(route_request(&request, app_state, &path, query.as_deref())).await {
+                Ok(response) => response,
+                Err(error) => error.into_response(),
+            };
 
         apply_problem_details(&mut response);
         apply_s3_cors(&path, &request, &mut response);
@@ -773,14 +521,10 @@ fn apply_s3_cors(path: &str, request: &Request, response: &mut Response) {
 
 #[cfg(test)]
 mod tests {
-    use super::request_decoder;
 
     #[tokio::test]
     async fn preview_streams_range_before_upstream_finishes_and_reuses_connection() {
-        use crate::{
-            config::{settings::Settings, state::AppState},
-            http_client::HttpClient,
-        };
+        use crate::config::{settings::Settings, state::AppState};
         use shiguredo_http11::RequestDecoder;
         use tokio::{
             io::{AsyncReadExt, AsyncWriteExt},
@@ -822,7 +566,7 @@ mod tests {
             });
             let state = AppState {
                 database: None,
-                client: HttpClient::new(),
+                client: crate::http_client::new(),
                 settings: Settings {
                     slack_bot_token: String::new(), slack_api_base_url: String::new(),
                     s3_access_key_id: "test".into(), s3_secret_access_key: "test".into(),
@@ -858,33 +602,6 @@ mod tests {
             upstream_task.await.unwrap();
             api_task.await.unwrap();
         }).await.unwrap();
-    }
-
-    #[test]
-    fn accepts_uploads_larger_than_default_limit() {
-        let body = vec![b'a'; 11 * 1024 * 1024];
-        for chunked in [false, true] {
-            let mut decoder = request_decoder();
-            let mut encoded = if chunked {
-                format!(
-                    "POST /s3/upload_part_base64 HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
-                    body.len()
-                ).into_bytes()
-            } else {
-                format!(
-                    "POST /s3/put_object_base64 HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
-                    body.len()
-                ).into_bytes()
-            };
-            encoded.extend_from_slice(&body);
-            if chunked {
-                encoded.extend_from_slice(b"\r\n0\r\n\r\n");
-            }
-            // A large feed also verifies that the receive buffer has no size cap.
-            decoder.feed(&encoded).unwrap();
-            let request = decoder.decode().unwrap().unwrap();
-            assert_eq!(request.body, body);
-        }
     }
 }
 

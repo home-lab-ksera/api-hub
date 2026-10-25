@@ -4,11 +4,7 @@ use shiguredo_s3::{
     types::{CompletedMultipartUpload, CompletedPart, HttpDate, ObjectIdentifier},
 };
 
-use crate::{
-    config::settings::Settings,
-    errors::api_error::ApiError,
-    http_client::{HttpClient, HttpRequest, HttpResponseStream},
-};
+use crate::{config::settings::Settings, errors::api_error::ApiError, http_client::HttpClient};
 
 pub struct PutObjectInput {
     pub bucket: String,
@@ -324,7 +320,7 @@ pub async fn get_object_proxy_stream(
     http_client: &HttpClient,
     settings: &Settings,
     input: ProxyObjectStreamInput,
-) -> Result<HttpResponseStream, ApiError> {
+) -> Result<reqwest::Response, ApiError> {
     let s3 = create_s3_client(settings)?;
     let mut request_builder = s3.get_object().bucket(input.bucket).key(input.key);
     if let Some(range) = input.range {
@@ -350,15 +346,17 @@ pub async fn get_object_proxy_stream(
         .map_err(map_s3_input_error_to_api_error)?;
 
     let url = build_s3_url(&request)?;
-    http_client
-        .send_streaming(HttpRequest {
-            method: request.method,
-            url,
-            headers: request.headers,
-            body: request.body,
-        })
-        .await
-        .map_err(|e| ApiError::InternalServerError(format!("S3 HTTP request failed: {e}")))
+    crate::http_client::request(
+        &http_client,
+        request.method,
+        url,
+        request.headers,
+        request.body,
+        true,
+    )
+    .send()
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("S3 HTTP request failed: {e}")))
 }
 
 pub async fn head_object(
@@ -984,20 +982,26 @@ fn create_s3_client(settings: &Settings) -> Result<S3Client, ApiError> {
 
 async fn execute_s3(http_client: &HttpClient, request: S3Request) -> Result<S3Response, ApiError> {
     let url = build_s3_url(&request)?;
-    let response = http_client
-        .send(HttpRequest {
-            method: request.method,
-            url,
-            headers: request.headers,
-            body: request.body,
-        })
-        .await
-        .map_err(|e| ApiError::InternalServerError(format!("S3 HTTP request failed: {e}")))?;
+    let response = crate::http_client::request(
+        &http_client,
+        request.method,
+        url,
+        request.headers,
+        request.body,
+        false,
+    )
+    .send()
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("S3 HTTP request failed: {e}")))?;
 
     Ok(S3Response {
-        status_code: response.status_code,
-        headers: response.headers,
-        body: response.body,
+        status_code: response.status().as_u16(),
+        headers: crate::http_client::headers(&response),
+        body: response
+            .bytes()
+            .await
+            .map_err(|e| ApiError::InternalServerError(format!("S3 body failed: {e}")))?
+            .to_vec(),
     })
 }
 

@@ -1,10 +1,9 @@
-use shiguredo_http11::{Request, RequestDecoder, Response, uri::percent_decode};
-use tokio::net::TcpStream;
+use futures_util::StreamExt;
+use shiguredo_http11::{Request, Response, uri::percent_decode};
 
 use crate::{
     config::state::AppState,
     errors::api_error::ApiError,
-    server::read_body_chunk,
     service::s3_service::{self, PutObjectInput, StreamingUpload},
 };
 
@@ -39,8 +38,7 @@ fn parse_target(uri: &str) -> Result<(String, String), ApiError> {
 }
 
 pub(crate) async fn upload(
-    stream: &mut TcpStream,
-    decoder: &mut RequestDecoder,
+    body: axum::body::Body,
     request: &Request,
     state: &AppState,
 ) -> Result<Response, ApiError> {
@@ -48,21 +46,17 @@ pub(crate) async fn upload(
     let content_type = request
         .get_header("content-type")
         .unwrap_or("application/octet-stream");
-    if request
-        .get_header("expect")
-        .is_some_and(|value| value.eq_ignore_ascii_case("100-continue"))
-    {
-        use tokio::io::AsyncWriteExt;
-        stream
-            .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
-            .await
-            .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    }
     let mut session: Option<StreamingUpload> = None;
+    let mut chunks = body.into_data_stream();
     let result = async {
         let mut part = Vec::with_capacity(PART_SIZE);
-        while let Some(chunk) = read_body_chunk(stream, decoder).await? {
-            let mut remaining = chunk.as_slice();
+        while let Some(chunk) =
+            tokio::time::timeout(std::time::Duration::from_secs(60), chunks.next())
+                .await
+                .map_err(|_| ApiError::BadRequest("Upload stalled".into()))?
+        {
+            let chunk = chunk.map_err(|_| ApiError::BadRequest("Incomplete HTTP body".into()))?;
+            let mut remaining = chunk.as_ref();
             while !remaining.is_empty() {
                 let count = remaining.len().min(PART_SIZE - part.len());
                 part.extend_from_slice(&remaining[..count]);
@@ -128,7 +122,9 @@ pub(crate) async fn upload(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::settings::Settings, http_client::HttpClient};
+    use crate::config::settings::Settings;
+    use shiguredo_http11::RequestDecoder;
+    use tokio::net::TcpStream;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -180,7 +176,7 @@ mod tests {
         });
         let state = AppState {
             database: None,
-            client: HttpClient::new(),
+            client: crate::http_client::new(),
             settings: Settings {
                 slack_bot_token: String::new(),
                 slack_api_base_url: String::new(),

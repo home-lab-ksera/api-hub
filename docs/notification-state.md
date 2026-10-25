@@ -35,3 +35,5 @@ APIプロセスの`GET /metrics`は通知DBから次のgaugeを返す（queue=`n
 
 SQLとpoolの取得は合わせて3秒以内。DB未設定・停止・schema未適用時は503を返し、ゼロ件として扱わない。
 既存poolを共有し、資格情報・通知本文・channel・event IDはmetricsに含めない。
+
+通知producerのhitomiは有効な202の受領で受付完了とし、accepted後に配送状態を継続GETしない。配送失敗・uncertainはこのapi-hubの監視と手動retryが管理する。hitomiに残る旧履歴のapi_idは移行時だけ一度identityを照合する。

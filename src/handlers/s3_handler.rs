@@ -3,7 +3,6 @@ use shiguredo_http11::Response;
 use crate::{
     config::state::AppState,
     errors::api_error::ApiError,
-    http_client::HttpResponseStream,
     service::s3_service::{
         self, AbortMultipartUploadInput, CompleteMultipartUploadInput, CompletePartInput,
         CreateBucketInput, CreateMultipartUploadInput, DeleteBucketInput,
@@ -18,7 +17,7 @@ pub struct PreviewObjectStreamResponse {
     pub status_code: u16,
     pub reason_phrase: &'static str,
     pub headers: Vec<(String, String)>,
-    pub body_stream: HttpResponseStream,
+    pub body_stream: reqwest::Response,
 }
 
 pub struct PutObjectBase64Request {
@@ -827,11 +826,11 @@ pub async fn preview_object_stream(
     )
     .await?;
 
-    let headers = build_preview_response_headers(&s3_response.headers, &key);
+    let headers = build_preview_response_headers(&crate::http_client::headers(&s3_response), &key);
 
     Ok(PreviewObjectStreamResponse {
-        status_code: s3_response.status_code,
-        reason_phrase: response_reason(s3_response.status_code),
+        status_code: s3_response.status().as_u16(),
+        reason_phrase: response_reason(s3_response.status().as_u16()),
         headers,
         body_stream: s3_response,
     })
