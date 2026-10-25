@@ -1,6 +1,7 @@
 name: ci
 
 on:
+  workflow_call:
   push:
     branches:
       - main
@@ -38,11 +39,7 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:test-only@localhost:5432/api_hub_test
         run: cargo test --locked --test notifications -- --ignored
 
-  docker-build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build Docker image
-        run: docker build -t api-hub:ci .
+      - name: Check bounded streaming memory with isolated HTTP fixtures
+        run: |
+          cargo build --locked
+          python3 scripts/check-stream-memory.py target/debug/api-hub

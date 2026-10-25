@@ -1,4 +1,4 @@
-use crate::{config::state::AppState, database::DbResult, http_client::HttpRequest};
+use crate::{config::state::AppState, database::DbResult};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use shiguredo_http11::Response;
@@ -116,6 +116,22 @@ pub async fn handle_retry(state: &AppState, id: &str) -> Response {
     }
 }
 
+struct SlackReply {
+    status_code: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+async fn slack_reply(response: reqwest::Response) -> Result<SlackReply, reqwest::Error> {
+    let status_code = response.status().as_u16();
+    let headers = crate::http_client::headers(&response);
+    let body = response.bytes().await?.to_vec();
+    Ok(SlackReply {
+        status_code,
+        headers,
+        body,
+    })
+}
+
 pub async fn deliver_one(state: &AppState) -> DbResult<bool> {
     let pool = state.database.as_ref().ok_or("database required")?;
     // Slackが受け取った直後にworkerが落ちた可能性があるため、lease切れは結果不明にする。
@@ -155,20 +171,28 @@ pub async fn deliver_one(state: &AppState) -> DbResult<bool> {
     } else {
         tokio::time::timeout(
             Duration::from_secs(60),
-            state.client.send(HttpRequest {
-                method: "POST".into(),
-                url: format!("{}/chat.postMessage", state.settings.slack_api_base_url),
-                headers: vec![
+            crate::http_client::request(
+                &state.client,
+                "POST".into(),
+                format!("{}/chat.postMessage", state.settings.slack_api_base_url),
+                vec![
                     (
                         "Authorization".into(),
                         format!("Bearer {}", state.settings.slack_bot_token),
                     ),
                     ("Content-Type".into(), "application/json".into()),
                 ],
-                body: payload.to_string().into_bytes(),
-            }),
+                payload.to_string().into_bytes(),
+                false,
+            )
+            .send(),
         )
         .await
+    };
+    let result = match result {
+        Ok(Ok(reply)) => Ok(slack_reply(reply).await),
+        Ok(Err(error)) => Ok(Err(error)),
+        Err(error) => Err(error),
     };
     let (status, delay, ts, error) = match result {
         Ok(Ok(reply)) if reply.status_code == 429 => {

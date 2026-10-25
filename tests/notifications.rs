@@ -1,7 +1,6 @@
 use api_hub::{
     config::{settings::Settings, state::AppState},
     database,
-    http_client::HttpClient,
     notifications::{self, Notification},
 };
 use sqlx::{Row, postgres::PgPoolOptions};
@@ -55,7 +54,7 @@ async fn durable_notifications() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let state = AppState {
         database: Some(pool.clone()),
-        client: HttpClient::new(),
+        client: api_hub::http_client::new(),
         settings: Settings {
             slack_bot_token: "test".into(),
             slack_api_base_url: format!("http://{}", listener.local_addr().unwrap()),

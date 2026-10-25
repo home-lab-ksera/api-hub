@@ -1,7 +1,6 @@
 use crate::{
     config::state::AppState,
     database::DbResult,
-    http_client::{HttpRequest, HttpResponse},
     service::s3_service::{self, ProxyObjectStreamInput},
 };
 use serde::{Deserialize, Serialize};
@@ -41,21 +40,23 @@ impl NotificationFile {
 pub enum FileError {
     Retry(i64, &'static str),
     Failed(&'static str),
+    Uncertain(&'static str),
 }
 impl FileError {
     pub fn status(&self) -> (&'static str, i64, &'static str) {
         match self {
             Self::Retry(delay, message) => ("retry", *delay, *message),
             Self::Failed(message) => ("failed", 0, *message),
+            Self::Uncertain(message) => ("uncertain", 0, *message),
         }
     }
 }
-fn rate_delay(reply: &HttpResponse) -> i64 {
+fn rate_delay(reply: &reqwest::Response) -> i64 {
     reply
-        .headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
-        .and_then(|(_, v)| v.parse::<i64>().ok())
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(60)
         .clamp(1, 86400)
 }
@@ -67,7 +68,7 @@ pub async fn deliver(
     claim: &str,
     payload: &Value,
     share_started: &mut bool,
-) -> Result<HttpResponse, FileError> {
+) -> Result<reqwest::Response, FileError> {
     let file: NotificationFile = serde_json::from_value(payload["file"].clone())
         .map_err(|_| FileError::Failed("invalid stored file reference"))?;
     file.validate()
@@ -87,26 +88,22 @@ pub async fn deliver(
     )
     .await
     .map_err(|_| FileError::Retry(60, "image storage unavailable"))?;
-    if response.status_code == 404 {
+    if response.status().as_u16() == 404 {
         return Err(FileError::Failed("notification image expired or missing"));
     }
-    if response.status_code != 200 {
+    if response.status().as_u16() != 200 {
         return Err(FileError::Retry(60, "image storage unavailable"));
     }
     let mut data = Vec::new();
-    let mut chunk = [0; 8192];
-    loop {
-        let n = response
-            .read_chunk(&mut chunk)
-            .await
-            .map_err(|_| FileError::Retry(60, "image read failed"))?;
-        if n == 0 {
-            break;
-        }
-        if data.len() + n > 2 * 1024 * 1024 {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| FileError::Retry(60, "image read failed"))?
+    {
+        if data.len() + chunk.len() > 2 * 1024 * 1024 {
             return Err(FileError::Failed("notification image exceeds 2 MiB"));
         }
-        data.extend_from_slice(&chunk[..n]);
+        data.extend_from_slice(&chunk);
     }
     let valid = if file.content_type == "image/jpeg" {
         data.starts_with(b"\xff\xd8\xff")
@@ -116,33 +113,37 @@ pub async fn deliver(
     if !valid {
         return Err(FileError::Failed("notification image signature invalid"));
     }
-    let reply = state
-        .client
-        .send(HttpRequest {
-            method: "GET".into(),
-            url: format!(
-                "{}/files.getUploadURLExternal?filename={}&length={}",
-                state.settings.slack_api_base_url,
-                shiguredo_http11::uri::percent_encode_query(&file.name),
-                data.len()
-            ),
-            headers: vec![(
-                "Authorization".into(),
-                format!("Bearer {}", state.settings.slack_bot_token),
-            )],
-            body: vec![],
-        })
-        .await
-        .map_err(|_| FileError::Retry(60, "Slack upload preparation failed"))?;
-    if reply.status_code == 429 {
+    let reply = crate::http_client::request(
+        &state.client,
+        "GET".into(),
+        format!(
+            "{}/files.getUploadURLExternal?filename={}&length={}",
+            state.settings.slack_api_base_url,
+            shiguredo_http11::uri::percent_encode_query(&file.name),
+            data.len()
+        ),
+        vec![(
+            "Authorization".into(),
+            format!("Bearer {}", state.settings.slack_bot_token),
+        )],
+        vec![],
+        false,
+    )
+    .send()
+    .await
+    .map_err(|_| FileError::Retry(60, "Slack upload preparation failed"))?;
+    if reply.status().as_u16() == 429 {
         return Err(FileError::Retry(rate_delay(&reply), "Slack rate limited"));
     }
-    if reply.status_code >= 500 {
+    if reply.status().as_u16() >= 500 {
         return Err(FileError::Retry(60, "Slack upload preparation unavailable"));
     }
-    let ticket: Value = serde_json::from_slice(&reply.body)
+    let ticket_status = reply.status().as_u16();
+    let ticket: Value = reply
+        .json()
+        .await
         .map_err(|_| FileError::Retry(60, "invalid upload ticket response"))?;
-    if !(200..300).contains(&reply.status_code) || ticket["ok"] != true {
+    if !(200..300).contains(&ticket_status) || ticket["ok"] != true {
         return Err(FileError::Failed("Slack rejected upload ticket"));
     }
     let url = ticket["upload_url"]
@@ -151,19 +152,24 @@ pub async fn deliver(
     let file_id = ticket["file_id"]
         .as_str()
         .ok_or(FileError::Failed("file ID missing"))?;
-    let upload = state
-        .client
-        .send(HttpRequest {
-            method: "POST".into(),
-            url: url.into(),
-            headers: vec![("Content-Type".into(), "application/octet-stream".into())],
-            body: data,
-        })
-        .await
-        .map_err(|_| FileError::Retry(60, "Slack file transfer failed"))?;
-    if !(200..300).contains(&upload.status_code) {
+    let upload = crate::http_client::request(
+        &state.client,
+        "POST".into(),
+        url.into(),
+        vec![("Content-Type".into(), "application/octet-stream".into())],
+        data,
+        false,
+    )
+    .send()
+    .await
+    .map_err(|_| FileError::Retry(60, "Slack file transfer failed"))?;
+    if !(200..300).contains(&upload.status().as_u16()) {
         return Err(FileError::Retry(60, "Slack file transfer rejected"));
     }
+    upload
+        .bytes()
+        .await
+        .map_err(|_| FileError::Retry(60, "Slack file transfer incomplete"))?;
     // channelへの共有前にfile IDを記録する。completeの応答不明は自動で再共有しない。
     let saved=sqlx::query("UPDATE notifications SET slack_file_id=$3 WHERE id=$1 AND claim_token=$2::uuid AND state='sending'").bind(id).bind(claim).bind(file_id).execute(pool).await.map_err(|_|FileError::Retry(60,"file ID persistence failed"))?;
     if saved.rows_affected() != 1 {
@@ -171,8 +177,8 @@ pub async fn deliver(
     }
     *share_started = true;
     // ここからの通信失敗は共通の結果不明判定へ渡す。
-    match state.client.send(HttpRequest{method:"POST".into(),url:format!("{}/files.completeUploadExternal",state.settings.slack_api_base_url),headers:vec![("Authorization".into(),format!("Bearer {}",state.settings.slack_bot_token)),("Content-Type".into(),"application/json".into())],body:json!({"files":[{"id":file_id,"title":file.name}],"channel_id":payload["channel"],"initial_comment":payload["text"]}).to_string().into_bytes()}).await {
+    match crate::http_client::request(&state.client,"POST".into(),format!("{}/files.completeUploadExternal",state.settings.slack_api_base_url),vec![("Authorization".into(),format!("Bearer {}",state.settings.slack_bot_token)),("Content-Type".into(),"application/json".into())],json!({"files":[{"id":file_id,"title":file.name}],"channel_id":payload["channel"],"initial_comment":payload["text"]}).to_string().into_bytes(),false).send().await {
         Ok(reply)=>Ok(reply),
-        Err(_)=>Ok(HttpResponse{status_code:500,headers:vec![],body:vec![]}),
+        Err(_)=>Err(FileError::Uncertain("Slack share response lost")),
     }
 }

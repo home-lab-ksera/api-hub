@@ -1,6 +1,6 @@
 use api_hub::{config, logging, server};
 use std::net::SocketAddr;
-use tracing::{error, info, info_span, warn};
+use tracing::{error, info, info_span};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
@@ -63,7 +63,7 @@ async fn main() {
         }
     };
 
-    let client = api_hub::http_client::HttpClient::new();
+    let client = api_hub::http_client::new();
 
     let app_state = config::state::AppState {
         settings,
@@ -101,36 +101,13 @@ async fn main() {
         "Server successfully bound to address"
     );
 
-    let mut shutdown = std::pin::pin!(shutdown_signal());
-
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => {
-                info!("Shutdown signal received, stopping accept loop");
-                break;
-            }
-            accepted = listener.accept() => {
-                match accepted {
-                    Ok((stream, peer_addr)) => {
-                        let state = app_state.clone();
-                        tokio::spawn(async move {
-                            server::handle_connection(stream, state).await;
-                            debug_connection_closed(peer_addr);
-                        });
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to accept incoming connection");
-                    }
-                }
-            }
-        }
+    if let Err(error) = server::serve(listener, app_state.clone(), shutdown_signal()).await {
+        error!(%error,"HTTP server failed");
     }
-
+    if let Some(pool) = app_state.database {
+        pool.close().await;
+    }
     info!("Server shutdown complete");
-}
-
-fn debug_connection_closed(peer_addr: SocketAddr) {
-    tracing::debug!(peer = %peer_addr, "Connection closed");
 }
 
 async fn shutdown_signal() {

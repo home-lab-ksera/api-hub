@@ -2,7 +2,7 @@ use shiguredo_http11::uri::percent_encode_query;
 use std::error::Error as StdError;
 use tracing::{debug, error, info, instrument};
 
-use crate::http_client::{HttpClient, HttpRequest};
+use crate::http_client::HttpClient;
 
 fn get_required_string(
     root: nojson::RawJsonValue<'_, '_>,
@@ -67,26 +67,30 @@ pub async fn send_message(
         "chat.postMessage"
     };
     debug!(api_endpoint = method, "Calling Slack API");
-    let response = client
-        .send(HttpRequest {
-            method: "POST".into(),
-            url: format!("{}/{method}", base_url.trim_end_matches('/')),
-            headers: vec![
-                ("Authorization".into(), format!("Bearer {token}")),
-                (
-                    "Content-Type".into(),
-                    "application/json; charset=utf-8".into(),
-                ),
-            ],
-            body: payload.as_bytes().to_vec(),
-        })
-        .await?;
-    if !(200..300).contains(&response.status_code) {
-        return Err(
-            std::io::Error::other(format!("Slack HTTP status {}", response.status_code)).into(),
-        );
+    let response = crate::http_client::request(
+        &client,
+        "POST".into(),
+        format!("{}/{method}", base_url.trim_end_matches('/')),
+        vec![
+            ("Authorization".into(), format!("Bearer {token}")),
+            (
+                "Content-Type".into(),
+                "application/json; charset=utf-8".into(),
+            ),
+        ],
+        payload.as_bytes().to_vec(),
+        false,
+    )
+    .send()
+    .await?;
+    if !(200..300).contains(&response.status().as_u16()) {
+        return Err(std::io::Error::other(format!(
+            "Slack HTTP status {}",
+            response.status().as_u16()
+        ))
+        .into());
     }
-    let response = String::from_utf8(response.body)?;
+    let response = String::from_utf8(response.bytes().await?.to_vec())?;
     let parsed = nojson::RawJson::parse(&response)?;
     if !get_required_bool(parsed.value(), "ok")? {
         let error =
@@ -113,24 +117,26 @@ pub async fn upload_file(
         "Getting upload URL from Slack"
     );
 
-    let response = client
-        .send(HttpRequest {
-            method: "GET".to_string(),
-            url: format!(
-                "{}?filename={}&length={}",
-                url,
-                percent_encode_query(file_name),
-                file_data.len()
-            ),
-            headers: vec![(
-                "Authorization".to_string(),
-                format!("Bearer {slack_bot_token}"),
-            )],
-            body: Vec::new(),
-        })
-        .await?;
+    let response = crate::http_client::request(
+        &client,
+        "GET".to_string(),
+        format!(
+            "{}?filename={}&length={}",
+            url,
+            percent_encode_query(file_name),
+            file_data.len()
+        ),
+        vec![(
+            "Authorization".to_string(),
+            format!("Bearer {slack_bot_token}"),
+        )],
+        Vec::new(),
+        false,
+    )
+    .send()
+    .await?;
 
-    let response = String::from_utf8(response.body)
+    let response = String::from_utf8(response.bytes().await?.to_vec())
         .map_err(|e| Box::<dyn StdError>::from(std::io::Error::other(e.to_string())))?;
 
     let parsed = nojson::RawJson::parse(&response)?;
@@ -156,17 +162,21 @@ pub async fn upload_file(
         "Uploading file content to Slack"
     );
 
-    client
-        .send(HttpRequest {
-            method: "POST".to_string(),
-            url: upload_url.clone(),
-            headers: vec![(
-                "Content-Type".to_string(),
-                "application/octet-stream".to_string(),
-            )],
-            body: file_data.to_vec(),
-        })
-        .await?;
+    crate::http_client::request(
+        &client,
+        "POST".to_string(),
+        upload_url.clone(),
+        vec![(
+            "Content-Type".to_string(),
+            "application/octet-stream".to_string(),
+        )],
+        file_data.to_vec(),
+        false,
+    )
+    .send()
+    .await?
+    .bytes()
+    .await?;
 
     debug!(
         file_id = %file_id,
@@ -212,19 +222,21 @@ pub async fn send_single_file_to_slack(
         "Completing file upload to Slack"
     );
 
-    let response_text = client
-        .send(HttpRequest {
-            method: "POST".to_string(),
-            url,
-            headers: vec![
-                ("Authorization".to_string(), format!("Bearer {token}")),
-                ("Content-Type".to_string(), "application/json".to_string()),
-            ],
-            body: data.to_string().into_bytes(),
-        })
-        .await?;
+    let response_text = crate::http_client::request(
+        &client,
+        "POST".to_string(),
+        url,
+        vec![
+            ("Authorization".to_string(), format!("Bearer {token}")),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ],
+        data.to_string().into_bytes(),
+        false,
+    )
+    .send()
+    .await?;
 
-    let response_text = String::from_utf8(response_text.body)
+    let response_text = String::from_utf8(response_text.bytes().await?.to_vec())
         .map_err(|e| Box::<dyn StdError>::from(std::io::Error::other(e.to_string())))?;
 
     let parsed = nojson::RawJson::parse(&response_text)?;

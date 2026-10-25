@@ -1,8 +1,5 @@
 use super::process_request;
-use crate::{
-    config::{settings::Settings, state::AppState},
-    http_client::HttpClient,
-};
+use crate::config::{settings::Settings, state::AppState};
 use shiguredo_http11::{Request, RequestDecoder, Response};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -36,7 +33,7 @@ async fn upstream(replies: Vec<(u16, &'static str)>) -> (AppState, JoinHandle<Ve
     });
     let state = AppState {
         database: None,
-        client: HttpClient::new(),
+        client: crate::http_client::new(),
         settings: Settings {
             slack_bot_token: "test-token".into(),
             slack_api_base_url: endpoint.clone(),
