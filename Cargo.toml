@@ -38,7 +38,7 @@ sqlx = { version = "0.8.6", default-features = false, features = ["postgres", "r
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 proptest = "1.7.0"
-tokio = { version = "1.44.0", features = ["time", "sync"] }
+tokio = { version = "1.44.0", features = ["time", "sync", "process"] }
 
 [[bin]]
 name = "api-hub"

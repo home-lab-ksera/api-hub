@@ -411,29 +411,37 @@ async fn integrated_api_delivers_and_drains_with_shared_three_connection_pool() 
             .await
             .unwrap();
     });
-    let state = AppState {
-        database: Some(pool.clone()),
-        client: api_hub::http_client::new(),
-        settings: Settings {
-            slack_bot_token: "fixture".into(),
-            slack_api_base_url: slack_url,
-            s3_access_key_id: "fixture".into(),
-            s3_secret_access_key: "fixture".into(),
-            s3_region: "us-east-1".into(),
-            s3_endpoint: None,
-            s3_browser_endpoint: None,
-            s3_use_path_style: true,
-            s3_session_token: None,
-        },
-    };
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    // 実CLIとSIGTERMで終了境界を確認する（HTTP fixture以外へは接続しない）。
+    let mut url = url::Url::parse(&std::env::var("TEST_DATABASE_URL").unwrap()).unwrap();
+    url.query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={schema}"));
+    let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_api-hub"))
+        .arg("--serve")
+        .env("DATABASE_URL", url.as_str())
+        .env("PGPOOL_MAX", "3")
+        .env("SLACK_BOT_TOKEN", "fixture")
+        .env("SLACK_API_BASE_URL", slack_url)
+        .env("RUSTFS_S3_ACCESS_KEY_ID", "fixture")
+        .env("RUSTFS_S3_SECRET_ACCESS_KEY", "fixture")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let address = "127.0.0.1:3000";
     let base = format!("http://{address}");
-    let (stop, stopped) = oneshot::channel();
-    let process = tokio::spawn(api_hub::server::serve_integrated(listener, state, async {
-        let _ = stopped.await;
-    }));
     let client = api_hub::http_client::new();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(process.try_wait().unwrap().is_none());
+            if client.get(format!("{base}/health")).send().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
     let post = |event| {
         client.post(format!("{base}/notifications")).json(&serde_json::json!({"producer":"fixture","event_id":event,"channel":"C1","text":"fixture"}))
     };
@@ -453,7 +461,13 @@ async fn integrated_api_delivers_and_drains_with_shared_three_connection_pool() 
             .unwrap()
             .contains("state=\"sending\"} 1")
     );
-    stop.send(()).unwrap();
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", &process.id().unwrap().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
     timeout(Duration::from_secs(3), async {
         loop {
             if tokio::net::TcpStream::connect(address).await.is_err() {
@@ -464,15 +478,17 @@ async fn integrated_api_delivers_and_drains_with_shared_three_connection_pool() 
     })
     .await
     .unwrap();
-    assert!(!process.is_finished());
+    assert!(process.try_wait().unwrap().is_none());
     release.send(()).unwrap();
-    timeout(Duration::from_secs(10), process)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+    assert!(
+        timeout(Duration::from_secs(10), process.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
     fixture.await.unwrap();
-    assert!(pool.is_closed());
+    pool.close().await;
     let states: Vec<String> = sqlx::query_scalar(&format!(
         "SELECT state FROM {schema}.notifications ORDER BY id"
     ))
