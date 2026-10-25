@@ -244,12 +244,26 @@ pub async fn deliver_one(state: &AppState) -> DbResult<bool> {
     Ok(true)
 }
 
-pub async fn worker(state: AppState) {
+pub async fn worker(state: AppState, shutdown: impl std::future::Future<Output = ()>) {
+    tokio::pin!(shutdown);
+    let mut pause = Duration::ZERO;
     loop {
-        if let Err(error) = deliver_one(&state).await {
-            tracing::error!(%error,"Notification worker failed");
+        // 初回claim前にsignal handlerを登録する。終了要求は次のclaimより優先する。
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
+            _ = tokio::time::sleep(pause) => {},
+        }
+        // 配送中はSIGTERMでfutureを捨てず、Slack応答とDB確定を待つ。
+        // DB停止も含め75秒で打ち切り、90秒のPod終了猶予内に終了する。
+        match tokio::time::timeout(Duration::from_secs(75), deliver_one(&state)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::error!(%error, "Notification worker failed"),
+            Err(_) => {
+                tracing::error!("Notification delivery deadline exceeded; lease recovery required")
+            }
         }
         // 1 workerを既定にし、channelへの連投を抑える。
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        pause = Duration::from_secs(1);
     }
 }

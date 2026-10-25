@@ -23,3 +23,15 @@ TEST_DATABASE_URL=postgres://.../isolated_test cargo test --locked --test notifi
 ```
 
 [Kubernetes切替手順](../../k8s_myHome/docs/application-postgresql-cutover.md)。
+
+通常の終了要求では新しい通知をclaimせず、処理中の1件のSlack応答とDB確定を待つ。
+DB待ちを含め1件の処理上限は75秒。Deploymentの`terminationGracePeriodSeconds`は90秒以上とする。
+強制終了・75秒の上限超過・送信結果不明では、従来どおりlease回復と`uncertain`の照合を使う。
+
+APIプロセスの`GET /metrics`は通知DBから次のgaugeを返す（queue=`notifications`）。
+- `application_queue_jobs{queue,state}`: 状態ごとの件数。空の状態は0。
+- `application_queue_oldest_pending_age_seconds{queue}`: pending/sending/retryの最古受付からの秒数。空なら0。
+- `application_queue_last_success_timestamp_seconds{queue}`: 最後にsentとなった時刻。実績がなければ0。
+
+SQLとpoolの取得は合わせて3秒以内。DB未設定・停止・schema未適用時は503を返し、ゼロ件として扱わない。
+既存poolを共有し、資格情報・通知本文・channel・event IDはmetricsに含めない。

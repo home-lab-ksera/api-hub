@@ -548,6 +548,7 @@ async fn route_request(
             return Ok(crate::notifications::handle_post(app_state, &request.body).await);
         }
         ("GET", "/health") => return Ok(health_handler::health()),
+        ("GET", "/metrics") => return Ok(crate::queue_metrics::handle(app_state).await),
         ("GET", "/openapi.json") => return Ok(openapi_handler::openapi_json()),
         ("POST", "/slack/message/update") => {
             return slack_handler::update_message(app_state, &request.body).await;
@@ -698,6 +699,7 @@ fn is_known_path(path: &str) -> bool {
         path,
         "/notifications"
             | "/health"
+            | "/metrics"
             | "/openapi.json"
             | "/slack/message/update"
             | "/s3/copy_object"

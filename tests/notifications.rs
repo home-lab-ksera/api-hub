@@ -42,6 +42,16 @@ async fn durable_notifications() {
         .await
         .unwrap();
     database::migrate(&pool).await.unwrap();
+    let empty = api_hub::queue_metrics::render(&pool).await.unwrap();
+    assert!(empty.contains("application_queue_jobs{queue=\"notifications\",state=\"pending\"} 0"));
+    assert!(
+        empty.contains("application_queue_oldest_pending_age_seconds{queue=\"notifications\"} 0")
+    );
+    assert!(
+        empty.contains(
+            "application_queue_last_success_timestamp_seconds{queue=\"notifications\"} 0"
+        )
+    );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let state = AppState {
         database: Some(pool.clone()),
@@ -217,9 +227,142 @@ async fn durable_notifications() {
         );
         assert_eq!(row.get::<String, _>("slack_file_id"), "F1");
     }
+    shutdown_drains_one_delivery(&pool, &state).await;
     pool.close().await;
+    assert_eq!(
+        api_hub::queue_metrics::handle(&state).await.status_code,
+        503
+    );
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
         .execute(&admin)
         .await
         .unwrap();
+}
+
+/// Slackが応答を返す前に終了要求を送っても、DB確定を待ち、次の通知は取得しない。
+async fn shutdown_drains_one_delivery(pool: &sqlx::PgPool, state: &AppState) {
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+    sqlx::query("UPDATE notifications SET state='sent'")
+        .execute(pool)
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut state = state.clone();
+    state.settings.slack_api_base_url = format!("http://{}", listener.local_addr().unwrap());
+    let (received_tx, received_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut decoder = shiguredo_http11::RequestDecoder::new();
+        loop {
+            if decoder.decode().unwrap().is_some() {
+                break;
+            }
+            let mut bytes = [0; 4096];
+            let n = socket.read(&mut bytes).await.unwrap();
+            assert!(n > 0);
+            decoder.feed(&bytes[..n]).unwrap();
+        }
+        received_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        let body = r#"{"ok":true,"ts":"drained"}"#;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let mut ids = Vec::new();
+    for event in ["shutdown-first", "shutdown-second"] {
+        let item = Notification {
+            producer: "test".into(),
+            event_id: event.into(),
+            channel: "C1".into(),
+            text: "drain".into(),
+            file: None,
+        };
+        ids.push(notifications::enqueue(pool, &item).await.unwrap().0);
+    }
+    sqlx::query("UPDATE notifications SET created_at=now()-interval '1 hour' WHERE id=ANY($1)")
+        .bind(&ids)
+        .execute(pool)
+        .await
+        .unwrap();
+    let metrics = api_hub::queue_metrics::render(pool).await.unwrap();
+    let age: f64 = metrics
+        .lines()
+        .find(|line| line.starts_with("application_queue_oldest_pending_age_seconds{"))
+        .unwrap()
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(age >= 3600.0);
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let mut worker = tokio::spawn(notifications::worker(state.clone(), async {
+        let _ = stop_rx.await;
+    }));
+    tokio::time::timeout(Duration::from_secs(5), received_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    stop_tx.send(()).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut worker)
+            .await
+            .is_err()
+    );
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    server.await.unwrap();
+    let rows: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM notifications WHERE id=ANY($1) ORDER BY id")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, ["sent", "pending"]);
+    notifications::worker(state.clone(), std::future::ready(())).await;
+    let pending: String = sqlx::query_scalar("SELECT state FROM notifications WHERE id=$1")
+        .bind(ids[1])
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(pending, "pending");
+    sqlx::query("UPDATE notifications SET state='uncertain' WHERE id=$1")
+        .bind(ids[1])
+        .execute(pool)
+        .await
+        .unwrap();
+    let metrics = api_hub::queue_metrics::render(pool).await.unwrap();
+    assert!(
+        metrics.contains("application_queue_jobs{queue=\"notifications\",state=\"uncertain\"} 1")
+    );
+    assert!(
+        metrics.contains("application_queue_oldest_pending_age_seconds{queue=\"notifications\"} 0")
+    );
+    let last: f64 = metrics
+        .lines()
+        .find(|line| line.starts_with("application_queue_last_success_timestamp_seconds{"))
+        .unwrap()
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(last > 0.0);
+    assert_eq!(
+        api_hub::queue_metrics::handle(&state).await.status_code,
+        200
+    );
 }

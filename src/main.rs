@@ -71,10 +71,7 @@ async fn main() {
         database,
     };
     if mode == "--notification-worker" {
-        tokio::select! {
-            _ = api_hub::notifications::worker(app_state) => {},
-            _ = shutdown_signal() => {},
-        }
+        api_hub::notifications::worker(app_state, shutdown_signal()).await;
         return;
     }
 
