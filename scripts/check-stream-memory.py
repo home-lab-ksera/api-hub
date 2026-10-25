@@ -119,6 +119,8 @@ def main():
     args = parser.parse_args()
     # 固定portを使う実binaryの起動試験。既存プロセスを上書きしない。
     with socket.socket() as probe:
+        # 終了済みの接続のTIME_WAITは許可し、稼働中のlistenerだけを拒否する。
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind(('127.0.0.1', 3000))
     for mode in ['upload', 'download']:
         small = run(str(args.binary.resolve()), 64 * 1024 * 1024, mode)

@@ -37,3 +37,13 @@ SQLとpoolの取得は合わせて3秒以内。DB未設定・停止・schema未�
 既存poolを共有し、資格情報・通知本文・channel・event IDはmetricsに含めない。
 
 通知producerのhitomiは有効な202の受領で受付完了とし、accepted後に配送状態を継続GETしない。配送失敗・uncertainはこのapi-hubの監視と手動retryが管理する。hitomiに残る旧履歴のapi_idは移行時だけ一度identityを照合する。
+
+## P5の統合起動
+
+準備imageの`--serve`はAPIと1本の配送taskを同じprocessで起動し、3接続のPgPoolを共有する。引数なしAPI専用と旧`--notification-worker`は切替時の暫定互換で、P6で撤去する。migrationは設定読込・HTTP受付・配送を開始せず終了する。
+
+一時的なDB/S3/Slack障害は既存workerの再試行と監視で扱う。workerの予期しない終了/panicではAPIも停止し、processを異常終了する。SIGTERMは新規受付・新規claimを止め、API最大80秒・通知最大75秒の進行分を待ち、最後に共有poolを閉じる。Pod猶予は90秒。
+
+切替は旧workerを0 replicaにするGitOps変更を先に配備し、Pod終了とsending/uncertainを確認してから、別の変更でAPIを`--serve`/Recreate/1 replicaへ切り替える。同一sync内のDeployment更新順序には依存しない。逆戻しは統合workerを先に停止し、API専用へ戻した後に旧workerを再開する。冪等キーを保持し、sending/uncertainを一括pendingへ戻さない。
+
+個人サーバーのDB復元後は再送・重複を許容し、統合processを起動して配送を再開できる。Slackとの事前照合を再開条件にせず、この目的だけのAPI専用modeや配送停止設定は最終構成へ残さない。通常のuncertain手動対応は維持する。

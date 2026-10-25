@@ -9,10 +9,7 @@ use tokio::{
     net::TcpListener,
 };
 
-/// 専用の空DBでのみ実行する。通常のunit testからは本番DBへ接続しない。
-#[tokio::test]
-#[ignore = "requires isolated TEST_DATABASE_URL"]
-async fn durable_notifications() {
+async fn isolated_pool() -> (sqlx::PgPool, sqlx::PgPool, String) {
     let admin = PgPoolOptions::new()
         .max_connections(1)
         .connect(&std::env::var("TEST_DATABASE_URL").expect("isolated database required"))
@@ -40,6 +37,14 @@ async fn durable_notifications() {
         .connect(&std::env::var("TEST_DATABASE_URL").expect("isolated database required"))
         .await
         .unwrap();
+    (pool, admin, schema)
+}
+
+/// 専用の空DBでのみ実行する。通常のunit testからは本番DBへ接続しない。
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn durable_notifications() {
+    let (pool, admin, schema) = isolated_pool().await;
     database::migrate(&pool).await.unwrap();
     let empty = api_hub::queue_metrics::render(&pool).await.unwrap();
     assert!(empty.contains("application_queue_jobs{queue=\"notifications\",state=\"pending\"} 0"));
@@ -364,4 +369,179 @@ async fn shutdown_drains_one_delivery(pool: &sqlx::PgPool, state: &AppState) {
         api_hub::queue_metrics::handle(&state).await.status_code,
         200
     );
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn integrated_api_delivers_and_drains_with_shared_three_connection_pool() {
+    use tokio::{
+        sync::oneshot,
+        time::{Duration, timeout},
+    };
+    let (pool, admin, schema) = isolated_pool().await;
+    database::migrate(&pool).await.unwrap();
+    let slack = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let slack_url = format!("http://{}", slack.local_addr().unwrap());
+    let (received, arrival) = oneshot::channel();
+    let (release, wait) = oneshot::channel();
+    let fixture = tokio::spawn(async move {
+        let (mut socket, _) = slack.accept().await.unwrap();
+        let mut decoder = shiguredo_http11::RequestDecoder::new();
+        let request = loop {
+            if let Some(request) = decoder.decode().unwrap() {
+                break request;
+            }
+            let mut chunk = [0; 4096];
+            let n = socket.read(&mut chunk).await.unwrap();
+            assert!(n > 0);
+            decoder.feed(&chunk[..n]).unwrap();
+        };
+        assert!(request.uri.ends_with("/chat.postMessage"));
+        received.send(()).unwrap();
+        wait.await.unwrap();
+        let body = r#"{"ok":true,"ts":"fixture"}"#;
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    // 実CLIとSIGTERMで終了境界を確認する（HTTP fixture以外へは接続しない）。
+    let mut url = url::Url::parse(&std::env::var("TEST_DATABASE_URL").unwrap()).unwrap();
+    url.query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={schema}"));
+    let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_api-hub"))
+        .arg("--serve")
+        .env("DATABASE_URL", url.as_str())
+        .env("PGPOOL_MAX", "3")
+        .env("SLACK_BOT_TOKEN", "fixture")
+        .env("SLACK_API_BASE_URL", slack_url)
+        .env("RUSTFS_S3_ACCESS_KEY_ID", "fixture")
+        .env("RUSTFS_S3_SECRET_ACCESS_KEY", "fixture")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let address = "127.0.0.1:3000";
+    let base = format!("http://{address}");
+    let client = api_hub::http_client::new();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(process.try_wait().unwrap().is_none());
+            if client.get(format!("{base}/health")).send().await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let post = |event| {
+        client.post(format!("{base}/notifications")).json(&serde_json::json!({"producer":"fixture","event_id":event,"channel":"C1","text":"fixture"}))
+    };
+    assert_eq!(post("first").send().await.unwrap().status(), 202);
+    timeout(Duration::from_secs(5), arrival)
+        .await
+        .unwrap()
+        .unwrap();
+    // Slack待ち中もpoolを占有せず、API受付・metricsを処理できる。
+    assert_eq!(post("second").send().await.unwrap().status(), 202);
+    let metrics = client.get(format!("{base}/metrics")).send().await.unwrap();
+    assert_eq!(metrics.status(), 200);
+    assert!(
+        metrics
+            .text()
+            .await
+            .unwrap()
+            .contains("state=\"sending\"} 1")
+    );
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", &process.id().unwrap().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if tokio::net::TcpStream::connect(address).await.is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(process.try_wait().unwrap().is_none());
+    release.send(()).unwrap();
+    assert!(
+        timeout(Duration::from_secs(10), process.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    fixture.await.unwrap();
+    pool.close().await;
+    let states: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT state FROM {schema}.notifications ORDER BY id"
+    ))
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    assert_eq!(states, ["sent", "pending"]);
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn migration_cli_does_not_load_http_settings_or_deliver() {
+    let (pool, admin, schema) = isolated_pool().await;
+    database::migrate(&pool).await.unwrap();
+    notifications::enqueue(
+        &pool,
+        &Notification {
+            producer: "fixture".into(),
+            event_id: "migration".into(),
+            channel: "C1".into(),
+            text: "fixture".into(),
+            file: None,
+        },
+    )
+    .await
+    .unwrap();
+    let mut url = url::Url::parse(&std::env::var("TEST_DATABASE_URL").unwrap()).unwrap();
+    url.query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={schema}"));
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_api-hub"))
+        .arg("--migrate")
+        .env("DATABASE_URL", url.as_str())
+        .env_remove("SLACK_BOT_TOKEN")
+        .env_remove("RUSTFS_S3_ACCESS_KEY_ID")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let state: String = sqlx::query_scalar("SELECT state FROM notifications")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "pending");
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
 }

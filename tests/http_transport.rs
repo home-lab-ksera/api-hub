@@ -307,3 +307,47 @@ async fn preview_preserves_unsatisfiable_range_status_headers_and_body() {
     fixture.await.unwrap();
     api.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn unavailable_database_keeps_integrated_http_running() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(3)
+        .acquire_timeout(Duration::from_millis(100))
+        .connect_lazy("postgres://fixture@127.0.0.1:1/unavailable")
+        .unwrap();
+    let mut app = state(None);
+    app.database = Some(pool.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = oneshot::channel();
+    let process = tokio::spawn(server::serve_integrated(listener, app, async {
+        let _ = stopped.await;
+    }));
+    let client = http_client::new();
+    assert_eq!(
+        client
+            .get(format!("{base}/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        503
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert!(!process.is_finished());
+    stop.send(()).unwrap();
+    timeout(Duration::from_secs(3), process)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(pool.is_closed());
+}
