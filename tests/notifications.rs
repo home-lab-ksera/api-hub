@@ -416,7 +416,6 @@ async fn integrated_api_delivers_and_drains_with_shared_three_connection_pool() 
     url.query_pairs_mut()
         .append_pair("options", &format!("-csearch_path={schema}"));
     let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_api-hub"))
-        .arg("--serve")
         .env("DATABASE_URL", url.as_str())
         .env("PGPOOL_MAX", "3")
         .env("SLACK_BOT_TOKEN", "fixture")

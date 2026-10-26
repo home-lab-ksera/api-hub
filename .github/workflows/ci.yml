@@ -41,5 +41,5 @@ jobs:
 
       - name: Check bounded streaming memory with isolated HTTP fixtures
         run: |
-          cargo build --locked
-          python3 scripts/check-stream-memory.py target/debug/api-hub
+          cargo build --locked --example http_fixture
+          python3 scripts/check-stream-memory.py target/debug/examples/http_fixture
