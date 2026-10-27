@@ -268,6 +268,16 @@ pub async fn deliver_one(state: &AppState) -> DbResult<bool> {
     Ok(true)
 }
 
+fn next_poll_delay(previous: Duration, worked: bool) -> Duration {
+    if worked {
+        Duration::from_secs(1)
+    } else {
+        previous
+            .saturating_mul(2)
+            .clamp(Duration::from_secs(1), Duration::from_secs(30))
+    }
+}
+
 pub async fn worker(state: AppState, shutdown: impl std::future::Future<Output = ()>) {
     tokio::pin!(shutdown);
     let mut pause = Duration::ZERO;
@@ -280,14 +290,37 @@ pub async fn worker(state: AppState, shutdown: impl std::future::Future<Output =
         }
         // 配送中はSIGTERMでfutureを捨てず、Slack応答とDB確定を待つ。
         // DB停止も含め75秒で打ち切り、90秒のPod終了猶予内に終了する。
-        match tokio::time::timeout(Duration::from_secs(75), deliver_one(&state)).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => tracing::error!(%error, "Notification worker failed"),
-            Err(_) => {
-                tracing::error!("Notification delivery deadline exceeded; lease recovery required")
+        let worked = match tokio::time::timeout(Duration::from_secs(75), deliver_one(&state)).await {
+            Ok(Ok(worked)) => worked,
+            Ok(Err(error)) => {
+                tracing::error!(%error, "Notification worker failed");
+                false
             }
+            Err(_) => {
+                tracing::error!("Notification delivery deadline exceeded; lease recovery required");
+                false
+            }
+        };
+        // 処理中は1秒を保ち、空キュー・DB障害時だけ最大30秒まで待機する。
+        pause = next_poll_delay(pause, worked);
+    }
+}
+
+#[cfg(test)]
+mod polling_tests {
+    use super::*;
+
+    #[test]
+    fn idle_polling_is_bounded_and_work_resets_the_delay() {
+        let mut pause = Duration::ZERO;
+        for seconds in [1, 2, 4, 8, 16, 30, 30] {
+            pause = next_poll_delay(pause, false);
+            assert_eq!(pause, Duration::from_secs(seconds));
         }
-        // 1 workerを既定にし、channelへの連投を抑える。
-        pause = Duration::from_secs(1);
+        pause = next_poll_delay(pause, true);
+        assert_eq!(pause, Duration::from_secs(1));
+        assert_eq!(next_poll_delay(pause, false), Duration::from_secs(2));
+        assert_eq!(next_poll_delay(pause, true), Duration::from_secs(1));
+        assert_eq!(next_poll_delay(Duration::MAX, false), Duration::from_secs(30));
     }
 }

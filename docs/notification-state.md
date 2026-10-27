@@ -5,6 +5,10 @@
 本番接続はPGHOST/PGDATABASE/PGPASSWORD/PGSSLROOTCERT、PGUSER=app。verify-fullを強制し、poolはAPI/配送共有3、migration 1を配備側で設定する。
 DATABASE_URLは隔離テスト用にも利用できる。
 
+配送taskは起動直後にキューを確認する。空キュー・DB障害時は待機を1→2→4→8→16→30秒へ延ばし、
+1件処理したら1秒へ戻す。空だったキューへの新着は次の確認まで最大約30秒待つ。
+行ごとのavailable_at/leaseとSlackのRetry-Afterは維持し、終了要求は待機中も即時に受け付ける。
+
 `POST /notifications` はproducer/event_id/channel/textを永続化して202を返す。同じ識別子と同じpayloadは同じIDとなり、payloadの変更は409。
 任意の画像bytesをDBへ入れず、fileは `pdfs/hitomi-notifications/<sha256>.jpg|png` の参照を受ける。画像は2MiB以下、形式を検証し、Slackのfile IDを保存する。
 
