@@ -1,23 +1,19 @@
-FROM nixos/nix:2.24.11 AS builder
+FROM rust:1.99.1-alpine3.22 AS builder
 
 WORKDIR /src
 
-COPY . .
+RUN apk add --no-cache build-base cmake perl ca-certificates
 
-# Build static binary and collect CA bundle via Nix
-RUN nix build .#api-hub-musl \
-      --extra-experimental-features 'nix-command flakes' \
-      --no-link \
-      --no-write-lock-file \
-      --print-out-paths > /tmp/api-hub.out && \
-    cp "$(cat /tmp/api-hub.out)/bin/api-hub" /tmp/api-hub && \
-    chmod +x /tmp/api-hub && \
-    nix build .#ca-certificates \
-      --extra-experimental-features 'nix-command flakes' \
-      --no-link \
-      --no-write-lock-file \
-      --print-out-paths > /tmp/cacert.out && \
-    cp "$(cat /tmp/cacert.out)/etc/ssl/certs/ca-bundle.crt" /tmp/ca-certificates.crt
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY migrations ./migrations
+COPY openapi.json ./openapi.json
+
+# x86_64 の旧CPUでも動く静的バイナリを生成する。
+RUN if [ "$(uname -m)" = x86_64 ]; then \
+      export RUSTFLAGS='-C target-cpu=x86-64 -C target-feature=-aes,-avx,-avx2'; \
+    fi && \
+    cargo build --release --locked --bin api-hub
 
 # Runtime stage
 FROM scratch
@@ -25,10 +21,10 @@ FROM scratch
 WORKDIR /
 
 # Copy CA bundle for outbound TLS
-COPY --from=builder /tmp/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 # Copy the binary from the builder stage
-COPY --from=builder /tmp/api-hub /api-hub
+COPY --from=builder /src/target/release/api-hub /api-hub
 
 # Expose the port your application listens on
 EXPOSE 3000
