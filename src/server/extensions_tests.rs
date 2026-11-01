@@ -70,13 +70,17 @@ fn string_member(body: &[u8], name: &str) -> String {
 async fn browser_signing_is_scoped_and_uses_external_host() {
     let (mut state, task) = upstream(vec![]).await;
     state.settings.s3_browser_endpoint = Some("https://s3.internal.example".into());
-    for key in [
-        "hitomi/20261024/001.pdf",
-        "hitomi/20261024/001_prev.jpg",
-        "videos/20261024/source/001.mp4",
+    for (bucket, key) in [
+        ("pdfs", "hitomi/20261024/001.pdf"),
+        ("pdfs", "hitomi/20261024/001_prev.jpg"),
+        ("pdfs", "videos/20261024/source/001.mp4"),
+        (
+            "home-camera-recordings",
+            "camera/2026/10/30/1793314800-session.mp4",
+        ),
     ] {
         let body =
-            serde_json::json!({"bucket":"pdfs","key":key,"expires_in_secs":604800}).to_string();
+            serde_json::json!({"bucket":bucket,"key":key,"expires_in_secs":604800}).to_string();
         let response = post(&state, "/s3/browser_get_object", &body).await;
         assert_eq!(response.status_code, 200);
         assert_eq!(response.get_header("cache-control"), Some("no-store"));
@@ -98,6 +102,9 @@ async fn browser_signing_is_scoped_and_uses_external_host() {
         );
     }
     for (bucket, key) in [
+        ("home-camera-recordings", "camera/2026/10/30/manifest.json"),
+        ("home-camera-recordings", "camera/2026/10/30/../secret.mp4"),
+        ("private", "camera/2026/10/30/1793314800-session.mp4"),
         ("private", "hitomi/test.pdf"),
         ("pdfs", "backup/test.pdf"),
         ("pdfs", "hitomi/../private.pdf"),

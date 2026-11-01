@@ -668,13 +668,51 @@ pub async fn presigned_get_object(app_state: &AppState, body: &[u8]) -> Result<R
     Ok(json_response(result))
 }
 
+// home-cameraのUTC日付フォルダに保存されたMP4だけを配信対象にする。
+fn is_camera_recording_key(key: &str) -> bool {
+    let parts: Vec<_> = key.split('/').collect();
+    parts.len() == 5
+        && !parts[0].is_empty()
+        && parts[0]
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        && [4, 2, 2]
+            .iter()
+            .zip(&parts[1..4])
+            .all(|(len, part)| part.len() == *len && part.bytes().all(|c| c.is_ascii_digit()))
+        && parts[4].ends_with(".mp4")
+        && parts[4].len() > 4
+}
+
+#[cfg(test)]
+mod camera_viewer_tests {
+    use super::is_camera_recording_key;
+
+    #[test]
+    fn camera_recording_scope() {
+        assert!(is_camera_recording_key(
+            "camera/2026/10/30/1793314800-session.mp4"
+        ));
+        for key in [
+            "camera/../10/30/a.mp4",
+            "camera/2026/10/30/a.json",
+            "camera/a.mp4",
+            "/2026/10/30/a.mp4",
+            "camera/2026/10/30/nested/a.mp4",
+        ] {
+            assert!(!is_camera_recording_key(key), "{key}");
+        }
+    }
+}
+
 /// 内部viewer専用。通常のS3 APIとは別に、公開する保存領域と署名期限を固定する。
 pub async fn browser_get_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
     let payload = parse_get_object_request(&body_to_utf8(body)?)?;
-    let allowed = payload.bucket == "pdfs"
+    let allowed = ((payload.bucket == "pdfs"
         && ((payload.key.starts_with("hitomi/")
             && (payload.key.ends_with(".pdf") || payload.key.ends_with("_prev.jpg")))
-            || (payload.key.starts_with("videos/") && payload.key.ends_with(".mp4")))
+            || (payload.key.starts_with("videos/") && payload.key.ends_with(".mp4"))))
+        || (payload.bucket == "home-camera-recordings" && is_camera_recording_key(&payload.key)))
         && !payload
             .key
             .split('/')
