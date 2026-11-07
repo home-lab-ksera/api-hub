@@ -86,7 +86,8 @@ jobs:
         oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
         audience: ${{ secrets.TS_AUDIENCE }}
         tags: tag:ci-harbor
-        args: --accept-routes --accept-dns=false
+        # subnet route の受け入れは Action が自動設定する。
+        args: --accept-dns=false
         hostname: api-hub-ci-${{ github.run_id }}-${{ github.run_attempt }}
         retry: '1'
 
