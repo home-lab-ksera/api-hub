@@ -1,11 +1,8 @@
 name: ci
 
+# build-and-push-api-hub.yml から呼び出す。単独では起動しない。
 on:
   workflow_call:
-  push:
-    branches:
-      - main
-  pull_request:
 
 jobs:
   rust-test:
