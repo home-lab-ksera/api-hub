@@ -2,7 +2,7 @@
 
 Slack APIとS3互換ストレージ API へのラッパーを提供するRust製APIサーバーです。
 
-OpenAPI definition: `openapi.yaml`
+OpenAPI definition: `openapi.json`（`GET /openapi.json` で配信）
 
 ## API
 
@@ -98,6 +98,10 @@ curl --fail-with-body 'http://localhost:3000/s3/put_object_stream?bucket=b&key=p
 - `RUSTFS_S3_ENDPOINT` (任意, 例: `http://rustfs.example.local:9000`)
 - `RUSTFS_S3_USE_PATH_STYLE` (任意, デフォルト: `true`)
 - `RUSTFS_S3_SESSION_TOKEN` (任意)
+- `RUST_LOG` (任意, デフォルト: `info`。例: `info,api_hub::service=debug`)
+- `LOG_TARGET` / `LOG_THREAD` / `LOG_LINE` (任意, `true` でモジュール名・スレッド・行番号を出力)
+
+ログは標準出力へ JSONL で出力します（1行1 JSON、リクエストIDを含む）。`jq 'select(.level == "ERROR")'` などで絞り込めます。
 
 ## 起動
 
@@ -129,7 +133,7 @@ cargo test --all-targets
 
 ## CI
 
-GitHub Actionsで `cargo test --all-targets` を実行します。
+`build-and-push-api-hub.yml` が `ci.yml`（テスト・PostgreSQL 通知復旧・ストリーミングのメモリ確認）を呼び出し、成功後にイメージを公開します。
 
 ## Slack投稿の拡張
 
