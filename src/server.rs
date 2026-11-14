@@ -383,10 +383,10 @@ async fn route_request(
         if request.method == "GET" {
             return Ok(crate::notifications::handle_get(app_state, id).await);
         }
-        if request.method == "POST" {
-            if let Some(id) = id.strip_suffix("/retry") {
-                return Ok(crate::notifications::handle_retry(app_state, id).await);
-            }
+        if request.method == "POST"
+            && let Some(id) = id.strip_suffix("/retry")
+        {
+            return Ok(crate::notifications::handle_retry(app_state, id).await);
         }
     }
     match (request.method.as_str(), path) {
