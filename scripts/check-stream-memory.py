@@ -126,7 +126,9 @@ def main():
         small = run(str(args.binary.resolve()), 64 * 1024 * 1024, mode)
         large = run(str(args.binary.resolve()), 256 * 1024 * 1024, mode)
         print(f'{mode}: 64MiB peak={small}KiB; 256MiB peak={large}KiB', flush=True)
-        assert large - small < 32 * 1024, 'memory grew with fixture size'
+        # 転送量に比例して増えるなら差は約192MiBになる。8MiBのpart bufferとその複製が
+        # allocatorに残る分は実行ごとに8〜32MiB揺れるため、part 8個分（64MiB）を上限とする。
+        assert large - small < 64 * 1024, 'memory grew with fixture size'
 
 
 if __name__ == '__main__':
