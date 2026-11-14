@@ -1,0 +1,8 @@
+# cargo-audit の設定。CI（rust-verify）は脆弱性が 1 件でもあると失敗する。
+[advisories]
+ignore = [
+    # sqlx の未使用 backend（sqlite / mysql）が Cargo.lock に載るだけで、依存グラフには入らない。
+    # `cargo tree -i libsqlite3-sys --target all` と `cargo tree -i rsa --target all` が何も出さないことで確認する。
+    "RUSTSEC-2026-0459", # libsqlite3-sys
+    "RUSTSEC-2023-0071", # rsa
+]
