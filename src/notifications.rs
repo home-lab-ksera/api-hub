@@ -290,7 +290,8 @@ pub async fn worker(state: AppState, shutdown: impl std::future::Future<Output =
         }
         // 配送中はSIGTERMでfutureを捨てず、Slack応答とDB確定を待つ。
         // DB停止も含め75秒で打ち切り、90秒のPod終了猶予内に終了する。
-        let worked = match tokio::time::timeout(Duration::from_secs(75), deliver_one(&state)).await {
+        let worked = match tokio::time::timeout(Duration::from_secs(75), deliver_one(&state)).await
+        {
             Ok(Ok(worked)) => worked,
             Ok(Err(error)) => {
                 tracing::error!(%error, "Notification worker failed");
@@ -321,6 +322,9 @@ mod polling_tests {
         assert_eq!(pause, Duration::from_secs(1));
         assert_eq!(next_poll_delay(pause, false), Duration::from_secs(2));
         assert_eq!(next_poll_delay(pause, true), Duration::from_secs(1));
-        assert_eq!(next_poll_delay(Duration::MAX, false), Duration::from_secs(30));
+        assert_eq!(
+            next_poll_delay(Duration::MAX, false),
+            Duration::from_secs(30)
+        );
     }
 }

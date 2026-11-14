@@ -347,7 +347,7 @@ pub async fn get_object_proxy_stream(
 
     let url = build_s3_url(&request)?;
     crate::http_client::request(
-        &http_client,
+        http_client,
         request.method,
         url,
         request.headers,
@@ -983,7 +983,7 @@ fn create_s3_client(settings: &Settings) -> Result<S3Client, ApiError> {
 async fn execute_s3(http_client: &HttpClient, request: S3Request) -> Result<S3Response, ApiError> {
     let url = build_s3_url(&request)?;
     let response = crate::http_client::request(
-        &http_client,
+        http_client,
         request.method,
         url,
         request.headers,

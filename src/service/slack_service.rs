@@ -68,7 +68,7 @@ pub async fn send_message(
     };
     debug!(api_endpoint = method, "Calling Slack API");
     let response = crate::http_client::request(
-        &client,
+        client,
         "POST".into(),
         format!("{}/{method}", base_url.trim_end_matches('/')),
         vec![
@@ -118,7 +118,7 @@ pub async fn upload_file(
     );
 
     let response = crate::http_client::request(
-        &client,
+        client,
         "GET".to_string(),
         format!(
             "{}?filename={}&length={}",
@@ -163,7 +163,7 @@ pub async fn upload_file(
     );
 
     crate::http_client::request(
-        &client,
+        client,
         "POST".to_string(),
         upload_url.clone(),
         vec![(
@@ -223,7 +223,7 @@ pub async fn send_single_file_to_slack(
     );
 
     let response_text = crate::http_client::request(
-        &client,
+        client,
         "POST".to_string(),
         url,
         vec![
