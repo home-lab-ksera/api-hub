@@ -153,7 +153,9 @@ async fn handle_http(
         .get_header("x-request-id")
         .map(str::to_owned)
         .unwrap_or_else(request_id::generate_request_id);
-    let result = if parts.method == axum::http::Method::POST && path == "/s3/put_object_stream" {
+    let result = if let Err(error) = check_request_source(&parts.method, path, &metadata) {
+        Err(error)
+    } else if parts.method == axum::http::Method::POST && path == "/s3/put_object_stream" {
         crate::s3_upload::upload(body, &metadata, &state)
             .await
             .map(|r| (r, None))
@@ -182,6 +184,13 @@ async fn handle_http(
         };
         match tokio::time::timeout(std::time::Duration::from_secs(60), to_bytes(body, limit)).await
         {
+            Ok(Ok(bytes)) if requires_json_body(&parts.method, path, &bytes, &metadata) => Ok((
+                crate::errors::api_error::problem_details_response(
+                    415,
+                    "Content-Type must be application/json",
+                ),
+                None,
+            )),
             Ok(Ok(bytes)) => {
                 metadata.body = bytes.to_vec();
                 Ok((process_request(metadata.clone(), &state).await, None))
@@ -225,6 +234,67 @@ async fn handle_http(
         }
     }
     response
+}
+
+/// ブラウザーからの更新操作を、viewer が使う経路だけに限定する。
+///
+/// api-hub に利用者認証はないため、tailnet 上の端末が開いた任意の Web ページから
+/// 更新 API を呼べないようにする。ブラウザーは別オリジンへの POST に必ず `Origin` を付ける。
+/// クラスタ内のクライアントはどちらのヘッダーも送らない。
+fn check_request_source(
+    method: &axum::http::Method,
+    path: &str,
+    request: &Request,
+) -> Result<(), ApiError> {
+    use axum::http::Method;
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return Ok(());
+    }
+    let origin = request.get_header("origin");
+    let from_browser = origin.is_some()
+        || request
+            .get_header("sec-fetch-site")
+            .is_some_and(|site| !site.eq_ignore_ascii_case("none"));
+    if !from_browser {
+        return Ok(());
+    }
+    if origin == Some(S3_CORS_ALLOWED_ORIGIN) && is_browser_path(path) {
+        return Ok(());
+    }
+    Err(ApiError::Forbidden(
+        "This operation is not available from a web page".into(),
+    ))
+}
+
+/// preflight を許可している経路と同じ。
+fn is_browser_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/s3/list_objects_v2"
+            | "/s3/browser_get_object"
+            | "/s3/presigned_get_object"
+            | "/s3/put_object_stream"
+    )
+}
+
+/// JSON API は `application/json` だけを受け付ける。
+/// `text/plain` などの preflight 不要な形式で JSON を送り込む経路を閉じる。
+fn requires_json_body(
+    method: &axum::http::Method,
+    path: &str,
+    body: &[u8],
+    request: &Request,
+) -> bool {
+    if *method != axum::http::Method::POST || body.is_empty() || path.starts_with("/slack/upload/")
+    {
+        return false;
+    }
+    !request.get_header("content-type").is_some_and(|value| {
+        value
+            .split(';')
+            .next()
+            .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/json"))
+    })
 }
 
 // raw HTTP fixtureも本番と同じRouterを使う。wire処理はHyperへ任せる。

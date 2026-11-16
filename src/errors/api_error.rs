@@ -4,6 +4,7 @@ use tracing::error;
 #[derive(Debug)]
 pub enum ApiError {
     BadRequest(String),
+    Forbidden(String),
     NotFound(String),
     MethodNotAllowed(String),
     InternalServerError(String),
@@ -13,6 +14,7 @@ impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BadRequest(message) => write!(f, "Bad Request: {message}"),
+            Self::Forbidden(message) => write!(f, "Forbidden: {message}"),
             Self::NotFound(message) => write!(f, "Not Found: {message}"),
             Self::MethodNotAllowed(message) => write!(f, "Method Not Allowed: {message}"),
             Self::InternalServerError(_) => write!(f, "Internal Server Error"),
@@ -54,6 +56,15 @@ impl ApiError {
                 );
                 problem_details_response(400, message.clone())
             }
+            ApiError::Forbidden(ref message) => {
+                error!(
+                    error_type = "forbidden",
+                    message = %message,
+                    status = 403,
+                    "API error occurred"
+                );
+                problem_details_response(403, message.clone())
+            }
             ApiError::NotFound(ref message) => {
                 error!(
                     error_type = "not_found",
@@ -91,11 +102,13 @@ pub fn reason_phrase(status_code: u16) -> &'static str {
         202 => "Accepted",
         204 => "No Content",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
         409 => "Conflict",
         413 => "Content Too Large",
+        415 => "Unsupported Media Type",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
         503 => "Service Unavailable",

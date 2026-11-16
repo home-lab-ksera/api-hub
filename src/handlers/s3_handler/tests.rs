@@ -74,3 +74,64 @@ proptest! {
         prop_assert_eq!(extracted, Some(value));
     }
 }
+
+#[test]
+fn preview_never_renders_stored_documents_in_the_api_origin() {
+    use super::{build_preview_response_headers, get_header_value};
+    let source = |content_type: &str| vec![("Content-Type".to_string(), content_type.to_string())];
+
+    for content_type in [
+        "text/html; charset=utf-8",
+        "image/svg+xml",
+        "application/xhtml+xml",
+        "text/plain",
+    ] {
+        let headers = build_preview_response_headers(&source(content_type), "a/page", 200);
+        assert_eq!(
+            get_header_value(&headers, "content-disposition"),
+            Some("attachment")
+        );
+        assert_eq!(
+            get_header_value(&headers, "content-security-policy"),
+            Some("sandbox; default-src 'none'")
+        );
+        assert_eq!(
+            get_header_value(&headers, "x-content-type-options"),
+            Some("nosniff")
+        );
+    }
+    // Content-Type がない本文も、ブラウザーに種類を推測させない。
+    let headers = build_preview_response_headers(&[], "a/page", 200);
+    assert_eq!(
+        get_header_value(&headers, "content-type"),
+        Some("application/octet-stream")
+    );
+    assert_eq!(
+        get_header_value(&headers, "content-disposition"),
+        Some("attachment")
+    );
+
+    // viewer が表示する形式はそのまま表示できる。
+    for (content_type, key) in [
+        ("image/jpeg", "hitomi/a_prev.jpg"),
+        ("video/mp4", "videos/a.mp4"),
+        ("application/pdf", "hitomi/a.pdf"),
+    ] {
+        for status in [200, 206] {
+            let headers = build_preview_response_headers(&source(content_type), key, status);
+            assert_ne!(
+                get_header_value(&headers, "content-disposition"),
+                Some("attachment")
+            );
+            assert_eq!(get_header_value(&headers, "content-security-policy"), None);
+            assert_eq!(
+                get_header_value(&headers, "x-content-type-options"),
+                Some("nosniff")
+            );
+        }
+    }
+    // 304 は保存済み応答の表示方法を変えない。
+    let headers = build_preview_response_headers(&[], "hitomi/a_prev.jpg", 304);
+    assert_eq!(get_header_value(&headers, "content-disposition"), None);
+    assert_eq!(get_header_value(&headers, "content-type"), None);
+}

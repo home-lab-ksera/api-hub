@@ -416,3 +416,95 @@ async fn invalid_inputs_fail_before_network_and_new_routes_reject_get() {
     }
     task.await.unwrap();
 }
+
+/// 本番と同じ Router へ生の HTTP を送り、応答全体を返す。
+async fn raw(state: &AppState, request: String) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let state = state.clone();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        super::handle_connection(socket, state).await;
+    });
+    client.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    timeout(Duration::from_secs(5), client.read_to_end(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    server.await.unwrap();
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+fn post_request(path: &str, headers: &str, body: &str) -> String {
+    format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}",
+        body.len()
+    )
+}
+
+#[tokio::test]
+async fn web_pages_cannot_call_update_apis() {
+    const VIEWER: &str = "Origin: https://hitomi-upload-viewer.internal.qroksera.com\r\n";
+    let body = r#"{"bucket":"b"}"#;
+    // 上流は応答を用意しない。到達すれば 403/415 以外になる。
+    let (state, _upstream) = upstream(vec![]).await;
+    for (path, headers) in [
+        // 任意のサイトからの preflight 不要な POST。
+        (
+            "/s3/delete_bucket",
+            "Origin: https://attacker.example\r\nContent-Type: text/plain\r\n",
+        ),
+        // preview で開いた文書（sandbox）や同一オリジンのページ。
+        (
+            "/s3/delete_bucket",
+            "Origin: null\r\nContent-Type: application/json\r\n",
+        ),
+        (
+            "/s3/list_buckets",
+            "Sec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n",
+        ),
+        // viewer でも、画面が使わない更新 API は呼べない。
+        ("/s3/delete_bucket", VIEWER),
+        ("/slack/message", VIEWER),
+    ] {
+        let headers = if headers == VIEWER {
+            format!("{VIEWER}Content-Type: application/json\r\n")
+        } else {
+            headers.to_string()
+        };
+        let response = raw(&state, post_request(path, &headers, body)).await;
+        assert!(response.starts_with("HTTP/1.1 403"), "{path}: {response}");
+        assert!(
+            !response
+                .to_ascii_lowercase()
+                .contains("access-control-allow-origin: https://attacker")
+        );
+    }
+    // ブラウザー以外でも、JSON API は application/json だけを受け付ける。
+    for headers in ["", "Content-Type: text/plain\r\n"] {
+        let response = raw(&state, post_request("/s3/delete_bucket", headers, body)).await;
+        assert!(response.starts_with("HTTP/1.1 415"), "{response}");
+    }
+}
+
+#[tokio::test]
+async fn viewer_and_cluster_clients_keep_working() {
+    let list = "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>";
+    let (state, upstream) = upstream(vec![(200, list), (200, list)]).await;
+    for headers in [
+        "Origin: https://hitomi-upload-viewer.internal.qroksera.com\r\nSec-Fetch-Site: same-site\r\nContent-Type: application/json\r\n",
+        "Content-Type: application/json; charset=utf-8\r\n",
+    ] {
+        let response = raw(
+            &state,
+            post_request("/s3/list_objects_v2", headers, r#"{"bucket":"b"}"#),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    }
+    assert_eq!(upstream.await.unwrap().len(), 2);
+}
