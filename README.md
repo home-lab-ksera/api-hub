@@ -75,6 +75,15 @@ curl --fail-with-body 'http://localhost:3000/s3/put_object_stream?bucket=b&key=p
 
 リバースプロキシを経由する場合は、このパスのリクエストボディのバッファリングを無効化し、サイズ制限とタイムアウトも動画サイズに合わせて設定してください。
 
+## ブラウザーからの利用制限
+
+api-hub に利用者認証はありません。Web ページからの不正な操作を防ぐため、次の制限があります。
+
+- JSON を受け取る `POST` は `Content-Type: application/json` が必須です（それ以外は 415）。`curl` では `-H 'Content-Type: application/json'` を付けてください。
+- `Origin` または `Sec-Fetch-Site` が付いた更新リクエスト（ブラウザーからの呼び出し）は、viewer (`https://hitomi-upload-viewer.internal.qroksera.com`) から `/s3/list_objects_v2`・`/s3/browser_get_object`・`/s3/presigned_get_object`・`/s3/put_object_stream` への呼び出しだけを受け付けます（それ以外は 403）。クラスタ内のクライアントはこれらのヘッダーを送らないため影響を受けません。
+- `GET /s3/preview/...` は PDF・画像（SVG を除く）・動画・音声だけをブラウザー内で表示します。それ以外は `Content-Disposition: attachment` と `Content-Security-Policy: sandbox` を付けてダウンロードさせます。
+- Gateway (`api-hub.internal.qroksera.com`) に通す経路は viewer 用の読み取り API だけです（`home-lab-k8s/manifests/apps/api-hub/access.yaml`）。更新・削除・Slack・通知はクラスタ内の `api-hub.sandbox.svc:3000` から呼びます。
+
 ## Error response (RFC9457)
 
 エラーレスポンスは `application/problem+json` の最小セットで返します。

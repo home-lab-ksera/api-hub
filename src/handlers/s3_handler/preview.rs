@@ -30,7 +30,9 @@ pub async fn preview_object(
     )
     .body(s3_response.body);
 
-    for (name, value) in build_preview_response_headers(&s3_response.headers, &key) {
+    for (name, value) in
+        build_preview_response_headers(&s3_response.headers, &key, s3_response.status_code)
+    {
         response.add_header(&name, &value);
     }
 
@@ -58,7 +60,11 @@ pub async fn preview_object_stream(
     )
     .await?;
 
-    let headers = build_preview_response_headers(&crate::http_client::headers(&s3_response), &key);
+    let headers = build_preview_response_headers(
+        &crate::http_client::headers(&s3_response),
+        &key,
+        s3_response.status().as_u16(),
+    );
 
     Ok(PreviewObjectStreamResponse {
         status_code: s3_response.status().as_u16(),
@@ -78,6 +84,7 @@ pub(super) fn extract_forward_header(headers: &[(String, String)], name: &str) -
 pub(super) fn build_preview_response_headers(
     source_headers: &[(String, String)],
     key: &str,
+    status_code: u16,
 ) -> Vec<(String, String)> {
     let pass_through_headers = [
         "content-type",
@@ -113,6 +120,22 @@ pub(super) fn build_preview_response_headers(
         );
     }
 
+    // 保存された Content-Type を信用して HTML などを api-hub のオリジンで表示しない。
+    upsert_header(&mut headers, "X-Content-Type-Options", "nosniff");
+    // 304 は本文も Content-Type も持たないため、保存済みの応答ヘッダーを書き換えない。
+    let content_type = get_header_value(&headers, "content-type");
+    if status_code != 304 && !content_type.is_some_and(is_inline_media) {
+        if content_type.is_none() {
+            upsert_header(&mut headers, "Content-Type", "application/octet-stream");
+        }
+        upsert_header(&mut headers, "Content-Disposition", "attachment");
+        upsert_header(
+            &mut headers,
+            "Content-Security-Policy",
+            "sandbox; default-src 'none'",
+        );
+    }
+
     headers
 }
 
@@ -141,6 +164,23 @@ pub(super) fn should_force_pdf_preview(content_type: Option<&str>, key: &str) ->
         .unwrap_or(false);
 
     is_pdf_key || is_pdf_content_type
+}
+
+/// ブラウザーがスクリプトを実行せずに表示できる形式。SVG は文書として扱われるため含めない。
+pub(super) fn is_inline_media(content_type: &str) -> bool {
+    let media = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    media == "application/pdf"
+        || matches!(
+            media.as_str(),
+            "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "image/avif"
+        )
+        || media.starts_with("video/")
+        || media.starts_with("audio/")
 }
 
 pub(super) fn response_reason(status_code: u16) -> &'static str {
