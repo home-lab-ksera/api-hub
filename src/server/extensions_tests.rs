@@ -508,3 +508,29 @@ async fn viewer_and_cluster_clients_keep_working() {
     }
     assert_eq!(upstream.await.unwrap().len(), 2);
 }
+
+/// 後処理は HTTP 層で1回だけ行う。ID がない要求にも1つだけ採番して返す。
+#[tokio::test]
+async fn every_response_gets_one_request_id_and_one_cors_header() {
+    let (state, _upstream) = upstream(vec![]).await;
+    for request in [
+        "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_string(),
+        "GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nx-request-id: given\r\n\r\n".to_string(),
+        post_request("/s3/head_object", "Content-Type: text/plain\r\n", "{}"),
+        "OPTIONS /s3/list_objects_v2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_string(),
+        "GET /s3/preview/bucket-only HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_string(),
+    ] {
+        let response = raw(&state, request.clone()).await.to_ascii_lowercase();
+        let head = response.split("\r\n\r\n").next().unwrap();
+        assert_eq!(head.matches("\r\nx-request-id: ").count(), 1, "{request}: {head}");
+        if request.contains("x-request-id: given") {
+            assert!(head.contains("\r\nx-request-id: given"), "{head}");
+        }
+        let cors = usize::from(request.contains(" /s3/"));
+        assert_eq!(
+            head.matches("\r\naccess-control-allow-origin: ").count(),
+            cors,
+            "{request}: {head}"
+        );
+    }
+}
