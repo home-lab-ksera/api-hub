@@ -1,0 +1,45 @@
+POST /notifications (new) => 202 application/json {"id":"1","state":"pending"}
+POST /notifications (same event) => 202 application/json {"id":"1","state":"pending"}
+POST /notifications (same event, other order) => 202 application/json {"id":"1","state":"pending"}
+POST /notifications (changed payload) => 409 application/problem+json {"type":"about:blank","title":"Conflict","status":409,"detail":"Conflict"}
+POST /notifications (escapes and unicode) => 202 application/json {"id":"5","state":"pending"}
+POST /notifications (unknown field) => 202 application/json {"id":"6","state":"pending"}
+POST /notifications (null file) => 202 application/json {"id":"7","state":"pending"}
+POST /notifications (file) => 202 application/json {"id":"8","state":"pending"}
+POST /notifications (invalid file) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (file missing field) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (missing text) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (blank producer) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (text too long) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (wrong type) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (null text) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (duplicate key) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (array) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (not json) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (trailing data) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+GET /notifications/1 => 200 application/json {"attempts":0,"channel":"C1","event_id":"e1","id":"1","last_error":null,"producer":"p","slack_file_id":null,"slack_ts":null,"state":"pending"}
+GET /notifications/5 => 200 application/json {"attempts":8,"channel":"C1","event_id":"e2","id":"5","last_error":"x","producer":"p","slack_file_id":null,"slack_ts":null,"state":"failed"}
+GET /notifications/2 => 404 application/problem+json {"type":"about:blank","title":"Not Found","status":404,"detail":"Not Found"}
+GET /notifications/999 => 404 application/problem+json {"type":"about:blank","title":"Not Found","status":404,"detail":"Not Found"}
+GET /notifications/abc => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications/1/retry => 409 application/problem+json {"type":"about:blank","title":"Conflict","status":409,"detail":"Conflict"}
+POST /notifications/5/retry => 202 application/json {"id":"5","state":"pending"}
+GET /notifications/5 => 200 application/json {"attempts":0,"channel":"C1","event_id":"e2","id":"5","last_error":null,"producer":"p","slack_file_id":null,"slack_ts":null,"state":"pending"}
+POST /notifications/999/retry => 409 application/problem+json {"type":"about:blank","title":"Conflict","status":409,"detail":"Conflict"}
+POST /notifications/abc/retry => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+GET /metrics => 200 text/plain; version=0.0.4; charset=utf-8 # TYPE application_queue_jobs gauge
+application_queue_jobs{queue="notifications",state="failed"} 0
+application_queue_jobs{queue="notifications",state="pending"} 5
+application_queue_jobs{queue="notifications",state="retry"} 0
+application_queue_jobs{queue="notifications",state="sending"} 0
+application_queue_jobs{queue="notifications",state="sent"} 0
+application_queue_jobs{queue="notifications",state="uncertain"} 0
+# TYPE application_queue_oldest_pending_age_seconds gauge
+application_queue_oldest_pending_age_seconds{queue="notifications"} <age>
+# TYPE application_queue_last_success_timestamp_seconds gauge
+application_queue_last_success_timestamp_seconds{queue="notifications"} 0
+row 1 p e1 C1 pending {"text": "hello", "channel": "C1"}
+row 5 p e2 C1 pending {"text": "改行\n\"quote\" \\ \u0001 😀 </script>", "channel": "C1"}
+row 6 p e3 C1 pending {"text": "t", "channel": "C1"}
+row 7 p e4 C1 pending {"text": "t", "channel": "C1"}
+row 8 p e5 C1 pending {"file": {"key": "hitomi-notifications/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png", "name": "a.png", "bucket": "pdfs", "content_type": "image/png"}, "text": "t", "channel": "C1"}

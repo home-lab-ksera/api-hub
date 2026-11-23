@@ -534,3 +534,170 @@ async fn every_response_gets_one_request_id_and_one_cors_header() {
         );
     }
 }
+
+/// TCP を使わず、メモリ上の接続で本番と同じ Router へ生の HTTP を送る。
+/// ポートを消費しないので、大量の要求を続けて送れる。
+async fn raw_in_memory(state: &AppState, request: String) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut client, server) = tokio::io::duplex(1 << 20);
+    let state = state.clone();
+    let server = tokio::spawn(super::handle_connection(server, state));
+    client.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    timeout(Duration::from_secs(5), client.read_to_end(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    server.await.unwrap();
+    String::from_utf8(response).unwrap()
+}
+
+/// 期待値ファイルと比べる。`UPDATE_GOLDEN=1` のときは期待値を書き換える。
+pub(crate) fn assert_golden(name: &str, actual: &str) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, actual).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("{} is missing; run with UPDATE_GOLDEN=1", path.display()));
+    if expected != actual {
+        let first = expected
+            .lines()
+            .zip(actual.lines())
+            .position(|(e, a)| e != a)
+            .unwrap_or_else(|| expected.lines().count().min(actual.lines().count()));
+        panic!(
+            "{name} differs at line {}:\n  expected: {}\n  actual:   {}\nrun with UPDATE_GOLDEN=1 if the change is intended",
+            first + 1,
+            expected.lines().nth(first).unwrap_or("<end>"),
+            actual.lines().nth(first).unwrap_or("<end>"),
+        );
+    }
+}
+
+/// HTTP の I/F を固定する。経路・メソッド・ヘッダーの組み合わせごとに、
+/// 状態コード・ヘッダー・本文を期待値ファイルと比べる。上流には接続できない状態で実行する。
+#[tokio::test]
+async fn http_interface_matches_golden() {
+    // 上流はポートを持ち続け、接続をすぐ切る。閉じたポートが再利用されて
+    // 別の fixture へ届くことを防ぎ、上流に触れる要求の結果を毎回同じにする。
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", closed.local_addr().unwrap());
+    let refuser = tokio::spawn(async move {
+        loop {
+            if let Ok((socket, _)) = closed.accept().await {
+                drop(socket);
+            }
+        }
+    });
+    let (mut state, _upstream) = upstream(vec![]).await;
+    state.settings.s3_endpoint = Some(endpoint.clone());
+    state.settings.slack_api_base_url = endpoint;
+    let paths = [
+        "/health",
+        "/health/",
+        "/health?x=1",
+        "/metrics",
+        "/openapi.json",
+        "/notifications",
+        "/notifications/",
+        "/notifications/1",
+        "/notifications/x",
+        "/notifications/retry",
+        "/notifications/1/retry",
+        "/slack/message",
+        "/slack/message/update",
+        "/slack/upload/image",
+        "/slack/upload/pdf",
+        "/slack/upload/other",
+        "/s3/put_object_base64",
+        "/s3/put_object_stream?bucket=b&key=k",
+        "/s3/put_object_stream",
+        "/s3/put_object_and_notify",
+        "/s3/get_object_base64",
+        "/s3/head_object",
+        "/s3/delete_object",
+        "/s3/delete_objects",
+        "/s3/copy_object",
+        "/s3/get_object_tagging",
+        "/s3/put_object_tagging",
+        "/s3/delete_object_tagging",
+        "/s3/list_objects_v2",
+        "/s3/create_multipart_upload",
+        "/s3/upload_part_base64",
+        "/s3/complete_multipart_upload",
+        "/s3/abort_multipart_upload",
+        "/s3/list_parts",
+        "/s3/list_multipart_uploads",
+        "/s3/presigned_get_object",
+        "/s3/presigned_put_object",
+        "/s3/browser_get_object",
+        "/s3/browser_open?bucket=pdfs&key=x",
+        "/s3/browser_open?bucket=pdfs&key=hitomi/a.pdf&key=x",
+        "/s3/preview/b/k.pdf",
+        "/s3/preview/b",
+        "/s3/list_buckets",
+        "/s3/create_bucket",
+        "/s3/head_bucket",
+        "/s3/delete_bucket",
+        "/s3/missing",
+        "/s3/x_base64",
+        "/missing",
+    ];
+    let variants = [
+        "Content-Type: application/json\r\n",
+        "",
+        "Content-Type: text/plain\r\n",
+        "Origin: https://hitomi-upload-viewer.internal.qroksera.com\r\nContent-Type: application/json\r\n",
+        "Origin: https://attacker.example\r\nContent-Type: application/json\r\n",
+        "Sec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n",
+    ];
+    let mut requests = Vec::new();
+    for path in paths {
+        for method in ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"] {
+            for headers in variants {
+                requests.push((method, path, headers));
+            }
+        }
+    }
+    use futures_util::StreamExt;
+    // 順序を保ったまま並行に送る。
+    let lines: Vec<String> = futures_util::stream::iter(requests)
+        .map(|(method, path, headers)| {
+            let state = state.clone();
+            async move {
+                let request = format!(
+                    "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nx-request-id: fixed\r\nContent-Length: 2\r\n{headers}\r\n{{}}"
+                );
+                let response = raw_in_memory(&state, request).await;
+                let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+                let mut lines: Vec<String> = head
+                    .lines()
+                    .skip(1)
+                    .map(str::to_ascii_lowercase)
+                    .filter(|line| !line.starts_with("date:"))
+                    .collect();
+                lines.sort();
+                let body = if body.len() > 1024 {
+                    format!("<{} bytes> {}…", body.len(), &body[..64])
+                } else {
+                    body.to_string()
+                };
+                format!(
+                    "{method} {path} [{}] => {} | {} | {body}\n",
+                    headers.trim_end().replace("\r\n", "; "),
+                    head.lines().next().unwrap_or(""),
+                    lines.join(", "),
+                )
+            }
+        })
+        .buffered(32)
+        .collect()
+        .await;
+    refuser.abort();
+    let out = lines.concat();
+    assert_golden("http_interface.golden", &out);
+}

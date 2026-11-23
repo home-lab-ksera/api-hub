@@ -400,7 +400,10 @@ fn is_json_request(method: &axum::http::Method, body: &[u8], request: &Request) 
 
 // raw HTTP fixtureも本番と同じRouterを使う。wire処理はHyperへ任せる。
 #[cfg(test)]
-pub(crate) async fn handle_connection(stream: tokio::net::TcpStream, state: AppState) {
+pub(crate) async fn handle_connection<S>(stream: S, state: AppState)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let io = hyper_util::rt::TokioIo::new(stream);
     let service = hyper_util::service::TowerToHyperService::new(router(state));
     let _ = hyper::server::conn::http1::Builder::new()
