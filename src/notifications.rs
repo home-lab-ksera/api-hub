@@ -1,4 +1,8 @@
-use crate::{config::state::AppState, database::DbResult};
+use crate::{
+    config::state::AppState,
+    database::DbResult,
+    service::slack_service::{SlackClient, SlackReplyBody, retry_after_secs},
+};
 use nojson::{DisplayJson, JsonFormatter, JsonValueKind, RawJson, RawJsonValue};
 use shiguredo_http11::Response;
 use sqlx::{PgPool, Row};
@@ -237,40 +241,6 @@ pub async fn handle_retry(state: &AppState, id: &str) -> Response {
     }
 }
 
-/// `chat.postMessage` の応答本文。
-///
-/// 以前の serde_json の `Value` と同じく、重複したキーは後の値を使い、
-/// 型の違う値やオブジェクト以外の JSON は「値なし」として扱う。
-struct SlackBody {
-    ok: Option<bool>,
-    ts: Option<String>,
-    error: Option<String>,
-}
-
-impl SlackBody {
-    /// JSON として読めないときは `None`。
-    fn parse(body: &[u8]) -> Option<Self> {
-        let json = RawJson::parse(std::str::from_utf8(body).ok()?).ok()?;
-        let mut parsed = Self {
-            ok: None,
-            ts: None,
-            error: None,
-        };
-        let Ok(members) = json.value().to_object() else {
-            return Some(parsed);
-        };
-        for (key, value) in members {
-            match key.to_unquoted_string_str().ok().as_deref() {
-                Some("ok") => parsed.ok = bool::try_from(value).ok(),
-                Some("ts") => parsed.ts = String::try_from(value).ok(),
-                Some("error") => parsed.error = String::try_from(value).ok(),
-                _ => {}
-            }
-        }
-        Some(parsed)
-    }
-}
-
 struct SlackReply {
     status_code: u16,
     headers: Vec<(String, String)>,
@@ -333,23 +303,15 @@ pub async fn deliver_one(state: &AppState) -> DbResult<bool> {
     } else {
         tokio::time::timeout(
             Duration::from_secs(60),
-            crate::http_client::request(
-                &state.client,
-                "POST".into(),
-                format!("{}/chat.postMessage", state.settings.slack_api_base_url),
-                vec![
-                    (
-                        "Authorization".into(),
-                        format!("Bearer {}", state.settings.slack_bot_token),
-                    ),
-                    ("Content-Type".into(), "application/json".into()),
-                ],
-                nojson::json(|f| f.value(Canonical(stored.value())))
-                    .to_string()
-                    .into_bytes(),
-                false,
-            )
-            .send(),
+            SlackClient::new(&state.client, &state.settings)
+                .post_json(
+                    "chat.postMessage",
+                    "application/json",
+                    nojson::json(|f| f.value(Canonical(stored.value())))
+                        .to_string()
+                        .into_bytes(),
+                )
+                .send(),
         )
         .await
     };
@@ -360,21 +322,21 @@ pub async fn deliver_one(state: &AppState) -> DbResult<bool> {
     };
     let (status, delay, ts, error) = match result {
         Ok(Ok(reply)) if reply.status_code == 429 => {
-            let delay = reply
-                .headers
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-                .and_then(|(_, value)| value.parse::<i64>().ok())
-                .unwrap_or(60)
-                .clamp(1, 86400);
+            let delay = retry_after_secs(
+                reply
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                    .map(|(_, value)| value.as_str()),
+            );
             ("retry", delay, None, Some("slack rate limited".to_string()))
         }
         Ok(Ok(reply)) if (200..300).contains(&reply.status_code) => {
-            match SlackBody::parse(&reply.body) {
-                Some(SlackBody {
+            match SlackReplyBody::parse(&reply.body) {
+                Some(SlackReplyBody {
                     ok: Some(true), ts, ..
                 }) => ("sent", 0, ts, None),
-                Some(SlackBody {
+                Some(SlackReplyBody {
                     ok: Some(false),
                     error,
                     ..

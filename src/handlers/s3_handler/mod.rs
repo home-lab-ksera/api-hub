@@ -273,10 +273,9 @@ pub async fn put_object_and_notify(
     )
     .await?;
     let result_json = parse_json_body(&result)?;
-    let notification = crate::service::slack_service::post_message(
-        &app_state.client,
-        &app_state.settings.slack_bot_token,
-        &app_state.settings.slack_api_base_url,
+    use crate::service::slack_service::{SlackClient, post_message};
+    let notification = post_message(
+        &SlackClient::new(&app_state.client, &app_state.settings),
         &payload.channel,
         &format!("{}\n{url}", payload.text),
     )

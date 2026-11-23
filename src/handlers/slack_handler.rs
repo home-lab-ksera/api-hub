@@ -223,15 +223,10 @@ async fn message(app_state: &AppState, body: &[u8], update: bool) -> Result<Resp
     let body = std::str::from_utf8(body)
         .map_err(|_| ApiError::BadRequest("Request body must be valid UTF-8".into()))?;
     let payload = message_payload(body, update)?;
-    let response = slack_service::send_message(
-        &app_state.client,
-        &app_state.settings.slack_bot_token,
-        &app_state.settings.slack_api_base_url,
-        update,
-        &payload,
-    )
-    .await
-    .map_err(|e| ApiError::InternalServerError(e.to_string()))?;
+    let slack = slack_service::SlackClient::new(&app_state.client, &app_state.settings);
+    let response = slack_service::send_message(&slack, update, &payload)
+        .await
+        .map_err(|e| ApiError::InternalServerError(e.to_string()))?;
     Ok(json_string_response(response))
 }
 
@@ -261,9 +256,7 @@ pub async fn upload_image_raw(
     let start = Instant::now();
 
     let response_text = slack_service::send_single_file_to_slack(
-        &app_state.client,
-        &app_state.settings.slack_bot_token,
-        &app_state.settings.slack_api_base_url,
+        &slack_service::SlackClient::new(&app_state.client, &app_state.settings),
         body,
         &file_name,
         &payload.channel,
@@ -329,9 +322,7 @@ pub async fn upload_pdf_raw(
     let start = Instant::now();
 
     let response_text = slack_service::send_single_file_to_slack(
-        &app_state.client,
-        &app_state.settings.slack_bot_token,
-        &app_state.settings.slack_api_base_url,
+        &slack_service::SlackClient::new(&app_state.client, &app_state.settings),
         body,
         &file_name,
         &payload.channel,

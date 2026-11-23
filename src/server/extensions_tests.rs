@@ -709,3 +709,226 @@ async fn http_interface_matches_golden() {
     let out = lines.concat();
     assert_golden("http_interface.golden", &out);
 }
+
+/// `put_object_and_notify` は Slack の失敗理由を `notification_error` としてそのまま返す。
+/// Slack の呼び出しを変えても、この文字列が変わらないことを固定する。
+#[tokio::test]
+async fn notification_error_strings_match_golden() {
+    use std::fmt::Write;
+    let request = r#"{"bucket":"b","key":"report.txt","file_data_base64":"aGk=","channel":"C1","text":"Report"}"#;
+    let mut out = String::new();
+    for (label, status, body) in [
+        ("ok", 200, r#"{"ok":true,"ts":"1.2"}"#),
+        (
+            "api error",
+            200,
+            r#"{"ok":false,"error":"channel_not_found"}"#,
+        ),
+        ("api error without code", 200, r#"{"ok":false}"#),
+        (
+            "api error with non-string code",
+            200,
+            r#"{"ok":false,"error":3}"#,
+        ),
+        ("missing ok", 200, r#"{"ts":"1.2"}"#),
+        ("ok is not a bool", 200, r#"{"ok":"true"}"#),
+        ("not json", 200, "<html>"),
+        ("empty body", 200, ""),
+        ("array", 200, "[]"),
+        ("rate limited", 429, r#"{"ok":false,"error":"ratelimited"}"#),
+        ("server error", 500, "oops"),
+        ("client error", 404, r#"{"ok":false,"error":"x"}"#),
+    ] {
+        let (state, task) = upstream(vec![(200, ""), (status, body)]).await;
+        let response = post(&state, "/s3/put_object_and_notify", request).await;
+        task.await.unwrap();
+        let json = nojson::RawJson::parse(std::str::from_utf8(&response.body).unwrap()).unwrap();
+        let notified = json
+            .value()
+            .to_member("notified")
+            .unwrap()
+            .required()
+            .unwrap();
+        let error = json
+            .value()
+            .to_member("notification_error")
+            .unwrap()
+            .required()
+            .unwrap();
+        writeln!(
+            out,
+            "{label} ({status} {body}) => {} notified={} notification_error={}",
+            response.status_code,
+            notified.as_raw_str(),
+            error.as_raw_str()
+        )
+        .unwrap();
+    }
+    // Slack へ接続できない場合。エラー文には URL が入るため、ポートを伏せる。
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", closed.local_addr().unwrap());
+    let refuser = tokio::spawn(async move {
+        loop {
+            if let Ok((socket, _)) = closed.accept().await {
+                drop(socket);
+            }
+        }
+    });
+    let (mut state, task) = upstream(vec![(200, "")]).await;
+    state.settings.slack_api_base_url = endpoint.clone();
+    let response = post(&state, "/s3/put_object_and_notify", request).await;
+    task.await.unwrap();
+    refuser.abort();
+    let json = nojson::RawJson::parse(std::str::from_utf8(&response.body).unwrap()).unwrap();
+    let error = json
+        .value()
+        .to_member("notification_error")
+        .unwrap()
+        .required()
+        .unwrap();
+    writeln!(
+        out,
+        "connection closed => {} notification_error={}",
+        response.status_code,
+        error.as_raw_str().replace(&endpoint, "<slack>")
+    )
+    .unwrap();
+    assert_golden("notification_errors.golden", &out);
+}
+
+/// ラベル・要求 URI・本文・上流が順に返す応答。
+type UploadCase<'a> = (&'a str, &'a str, &'a [u8], &'a [(u16, &'a str)]);
+
+/// 同期のファイル送信（`/slack/upload/{image,pdf}`）が Slack へ送る要求と、利用者への応答を固定する。
+#[tokio::test]
+async fn slack_upload_requests_match_golden() {
+    use std::fmt::Write;
+    let png = b"\x89PNG\r\n\x1a\nimage".to_vec();
+    let mut out = String::new();
+    // 上流は応答を順に返す。upload_url は上流自身を指す。
+    let cases: [UploadCase; 5] = [
+        (
+            "image ok",
+            "/slack/upload/image?channel=C1&file_name=a+b.png",
+            &png,
+            &[
+                (
+                    200,
+                    r#"{"ok":true,"upload_url":"<endpoint>/upload/1","file_id":"F1"}"#,
+                ),
+                (200, "OK - 5"),
+                (200, r#"{"ok":true,"files":[{"id":"F1"}]}"#),
+            ],
+        ),
+        (
+            "pdf default name",
+            "/slack/upload/pdf?channel=C1",
+            b"%PDF-1.7",
+            &[
+                (
+                    200,
+                    r#"{"ok":true,"upload_url":"<endpoint>/upload/2","file_id":"F2"}"#,
+                ),
+                (200, ""),
+                (200, r#"{"ok":true}"#),
+            ],
+        ),
+        (
+            "ticket rejected",
+            "/slack/upload/image?channel=C1",
+            &png,
+            &[(200, r#"{"ok":false,"error":"invalid_auth"}"#)],
+        ),
+        (
+            "share rejected",
+            "/slack/upload/image?channel=C1",
+            &png,
+            &[
+                (
+                    200,
+                    r#"{"ok":true,"upload_url":"<endpoint>/upload/3","file_id":"F3"}"#,
+                ),
+                (200, ""),
+                (200, r#"{"ok":false,"error":"channel_not_found"}"#),
+            ],
+        ),
+        (
+            "share invalid json",
+            "/slack/upload/image?channel=C1",
+            &png,
+            &[
+                (
+                    200,
+                    r#"{"ok":true,"upload_url":"<endpoint>/upload/4","file_id":"F4"}"#,
+                ),
+                (200, ""),
+                (200, "nope"),
+            ],
+        ),
+    ];
+    for (label, uri, body, replies) in cases {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let replies: Vec<(u16, String)> = replies
+            .iter()
+            .map(|(status, body)| (*status, body.replace("<endpoint>", &endpoint)))
+            .collect();
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut decoder = RequestDecoder::new();
+                let request = loop {
+                    if let Some(request) = decoder.decode().unwrap() {
+                        break request;
+                    }
+                    let mut buffer = [0; 4096];
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(n, 0);
+                    decoder.feed(&buffer[..n]).unwrap();
+                };
+                requests.push(request);
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let (mut state, _unused) = upstream(vec![]).await;
+        state.settings.slack_api_base_url = endpoint.clone();
+        let content_type = if uri.contains("pdf") {
+            "application/pdf"
+        } else {
+            "image/png"
+        };
+        let request = Request::new("POST", uri)
+            .header("Content-Type", content_type)
+            .body(body.to_vec());
+        let response = timeout(Duration::from_secs(5), process_request(request, &state))
+            .await
+            .unwrap();
+        let requests = task.await.unwrap();
+        writeln!(
+            out,
+            "{label}: {} {}",
+            response.status_code,
+            String::from_utf8_lossy(&response.body)
+        )
+        .unwrap();
+        for request in requests {
+            writeln!(
+                out,
+                "  {} {} authorization={:?} content-type={:?} body={:?}",
+                request.method,
+                request.uri,
+                request.get_header("authorization"),
+                request.get_header("content-type"),
+                String::from_utf8_lossy(&request.body)
+            )
+            .unwrap();
+        }
+    }
+    assert_golden("slack_upload.golden", &out);
+}
