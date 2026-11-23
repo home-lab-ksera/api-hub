@@ -733,3 +733,304 @@ async fn notification_api_matches_golden() {
         .unwrap();
     assert_golden("notification_api.golden", &out);
 }
+
+/// 経路ごとの固定応答を返す上流。S3 と Slack の両方を兼ねる。
+async fn routed_upstream(
+    routes: Vec<(&'static str, u16, &'static str, Vec<u8>)>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let base = endpoint.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let routes = routes.clone();
+            let base = base.clone();
+            tokio::spawn(async move {
+                let mut decoder = shiguredo_http11::RequestDecoder::with_limits(
+                    shiguredo_http11::DecoderLimits::unlimited(),
+                );
+                let request = loop {
+                    if let Some(request) = decoder.decode().unwrap() {
+                        break request;
+                    }
+                    let mut bytes = [0; 8192];
+                    let n = socket.read(&mut bytes).await.unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    decoder.feed(&bytes[..n]).unwrap();
+                };
+                let path = request.uri.split('?').next().unwrap().to_string();
+                let (status, headers, body) = routes
+                    .iter()
+                    .find(|(prefix, ..)| path.starts_with(prefix))
+                    .map(|(_, status, headers, body)| {
+                        // 文字列の本文だけ、上流自身の URL を埋め込む。
+                        let body = match std::str::from_utf8(body) {
+                            Ok(text) => text.replace("<endpoint>", &base).into_bytes(),
+                            Err(_) => body.clone(),
+                        };
+                        (*status, *headers, body)
+                    })
+                    .unwrap_or((599, "", Vec::new()));
+                if status == 0 {
+                    // 応答せずに切断する。
+                    return;
+                }
+                let head = format!(
+                    "HTTP/1.1 {status} Test\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(&[head.into_bytes(), body].concat()).await;
+            });
+        }
+    });
+    (endpoint, task)
+}
+
+/// 配送の結果として DB に残る内容を固定する。
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn delivery_outcomes_match_golden() {
+    use std::fmt::Write;
+    let (pool, admin, schema) = isolated_pool().await;
+    database::migrate(&pool).await.unwrap();
+    let hash = "0123456789abcdef".repeat(4);
+    let key = format!("hitomi-notifications/{hash}.png");
+    let png = b"\x89PNG\r\n\x1a\nimage".to_vec();
+    let ticket = br#"{"ok":true,"upload_url":"<endpoint>/upload/1","file_id":"F1"}"#.to_vec();
+    let ok = br#"{"ok":true,"ts":"1.2"}"#.to_vec();
+    let text = |body: &str| body.as_bytes().to_vec();
+    let image = format!("/pdfs/{key}");
+    let image: &'static str = Box::leak(image.into_boxed_str());
+    // (ラベル, ファイル付きか, 送信前の試行回数, 経路ごとの応答)
+    type Route = (&'static str, u16, &'static str, Vec<u8>);
+    let scenarios: Vec<(&str, bool, i32, Vec<Route>)> = vec![
+        (
+            "text sent",
+            false,
+            0,
+            vec![("/chat.postMessage", 200, "", ok.clone())],
+        ),
+        (
+            "text api error",
+            false,
+            0,
+            vec![(
+                "/chat.postMessage",
+                200,
+                "",
+                text(r#"{"ok":false,"error":"channel_not_found"}"#),
+            )],
+        ),
+        (
+            "text ratelimited code",
+            false,
+            0,
+            vec![(
+                "/chat.postMessage",
+                200,
+                "",
+                text(r#"{"ok":false,"error":"ratelimited"}"#),
+            )],
+        ),
+        (
+            "text 429",
+            false,
+            0,
+            vec![("/chat.postMessage", 429, "Retry-After: 7\r\n", Vec::new())],
+        ),
+        (
+            "text 429 at limit",
+            false,
+            7,
+            vec![("/chat.postMessage", 429, "Retry-After: 7\r\n", Vec::new())],
+        ),
+        (
+            "text 500",
+            false,
+            0,
+            vec![("/chat.postMessage", 500, "", Vec::new())],
+        ),
+        (
+            "text 404",
+            false,
+            0,
+            vec![("/chat.postMessage", 404, "", Vec::new())],
+        ),
+        (
+            "text invalid body",
+            false,
+            0,
+            vec![("/chat.postMessage", 200, "", text("nope"))],
+        ),
+        (
+            "text disconnect",
+            false,
+            0,
+            vec![("/chat.postMessage", 0, "", Vec::new())],
+        ),
+        (
+            "file sent",
+            true,
+            0,
+            vec![
+                (image, 200, "", png.clone()),
+                ("/files.getUploadURLExternal", 200, "", ticket.clone()),
+                ("/upload/", 200, "", Vec::new()),
+                ("/files.completeUploadExternal", 200, "", ok.clone()),
+            ],
+        ),
+        (
+            "file image missing",
+            true,
+            0,
+            vec![(image, 404, "", Vec::new())],
+        ),
+        (
+            "file storage error",
+            true,
+            0,
+            vec![(image, 503, "", Vec::new())],
+        ),
+        (
+            "file storage error at limit",
+            true,
+            7,
+            vec![(image, 503, "", Vec::new())],
+        ),
+        (
+            "file bad signature",
+            true,
+            0,
+            vec![(image, 200, "", text("GIF89a"))],
+        ),
+        (
+            "file ticket 429",
+            true,
+            0,
+            vec![
+                (image, 200, "", png.clone()),
+                (
+                    "/files.getUploadURLExternal",
+                    429,
+                    "Retry-After: 9\r\n",
+                    Vec::new(),
+                ),
+            ],
+        ),
+        (
+            "file ticket rejected",
+            true,
+            0,
+            vec![
+                (image, 200, "", png.clone()),
+                (
+                    "/files.getUploadURLExternal",
+                    200,
+                    "",
+                    text(r#"{"ok":false,"error":"invalid_auth"}"#),
+                ),
+            ],
+        ),
+        (
+            "file transfer rejected",
+            true,
+            0,
+            vec![
+                (image, 200, "", png.clone()),
+                ("/files.getUploadURLExternal", 200, "", ticket.clone()),
+                ("/upload/", 500, "", Vec::new()),
+            ],
+        ),
+        (
+            "file share 500",
+            true,
+            0,
+            vec![
+                (image, 200, "", png.clone()),
+                ("/files.getUploadURLExternal", 200, "", ticket.clone()),
+                ("/upload/", 200, "", Vec::new()),
+                ("/files.completeUploadExternal", 500, "", Vec::new()),
+            ],
+        ),
+        (
+            "file share disconnect",
+            true,
+            0,
+            vec![
+                (image, 200, "", png.clone()),
+                ("/files.getUploadURLExternal", 200, "", ticket.clone()),
+                ("/upload/", 200, "", Vec::new()),
+                ("/files.completeUploadExternal", 0, "", Vec::new()),
+            ],
+        ),
+    ];
+    let mut out = String::new();
+    for (index, (label, with_file, attempts, routes)) in scenarios.into_iter().enumerate() {
+        let (endpoint, server) = routed_upstream(routes).await;
+        let state = AppState {
+            database: Some(pool.clone()),
+            client: api_hub::http_client::new(),
+            settings: Settings {
+                slack_bot_token: "test".into(),
+                slack_api_base_url: endpoint.clone(),
+                s3_access_key_id: "test".into(),
+                s3_secret_access_key: "test".into(),
+                s3_region: "us-east-1".into(),
+                s3_endpoint: Some(endpoint),
+                s3_browser_endpoint: None,
+                s3_use_path_style: true,
+                s3_session_token: None,
+            },
+        };
+        let item = Notification {
+            producer: "golden".into(),
+            event_id: format!("event-{index}"),
+            channel: "C1".into(),
+            text: "caption".into(),
+            file: with_file.then(|| api_hub::notifications::NotificationFile {
+                bucket: "pdfs".into(),
+                key: key.clone(),
+                name: "image.png".into(),
+                content_type: "image/png".into(),
+            }),
+        };
+        let id = notifications::enqueue(&pool, &item).await.unwrap().0;
+        sqlx::query("UPDATE notifications SET attempts=$2 WHERE id=$1")
+            .bind(id)
+            .bind(attempts)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(notifications::deliver_one(&state).await.unwrap());
+        server.abort();
+        let row = sqlx::query("SELECT state,attempts,slack_ts,slack_file_id,last_error,round(EXTRACT(EPOCH FROM available_at-updated_at))::bigint AS delay,lease_until IS NULL AS released FROM notifications WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let delay: i64 = row.get("delay");
+        writeln!(
+            out,
+            "{label}: state={} attempts={} delay={} slack_ts={:?} slack_file_id={:?} last_error={:?} released={}",
+            row.get::<String, _>("state"),
+            row.get::<i32, _>("attempts"),
+            if row.get::<String, _>("state") == "retry" { delay } else { 0 },
+            row.get::<Option<String>, _>("slack_ts"),
+            row.get::<Option<String>, _>("slack_file_id"),
+            row.get::<Option<String>, _>("last_error"),
+            row.get::<bool, _>("released"),
+        )
+        .unwrap();
+    }
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_golden("delivery_outcomes.golden", &out);
+}
