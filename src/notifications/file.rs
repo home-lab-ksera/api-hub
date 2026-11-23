@@ -1,10 +1,11 @@
 use super::{Canonical, KnownFields};
+use crate::service::slack_service::{SlackClient, SlackReplyBody, retry_after_secs};
 use crate::{
     config::state::AppState,
     database::DbResult,
     service::s3_service::{self, ProxyObjectStreamInput},
 };
-use nojson::{DisplayJson, JsonFormatter, RawJson, RawJsonValue};
+use nojson::{DisplayJson, JsonFormatter, RawJsonValue};
 use sqlx::PgPool;
 
 pub struct NotificationFile {
@@ -61,37 +62,6 @@ impl DisplayJson for NotificationFile {
     }
 }
 
-/// `files.getUploadURLExternal` の応答本文。重複したキーは後の値を使う。
-struct UploadTicket {
-    ok: Option<bool>,
-    upload_url: Option<String>,
-    file_id: Option<String>,
-}
-
-impl UploadTicket {
-    /// JSON として読めないときは `None`。
-    fn parse(body: &[u8]) -> Option<Self> {
-        let json = RawJson::parse(std::str::from_utf8(body).ok()?).ok()?;
-        let mut ticket = Self {
-            ok: None,
-            upload_url: None,
-            file_id: None,
-        };
-        let Ok(members) = json.value().to_object() else {
-            return Some(ticket);
-        };
-        for (key, value) in members {
-            match key.to_unquoted_string_str().ok().as_deref() {
-                Some("ok") => ticket.ok = bool::try_from(value).ok(),
-                Some("upload_url") => ticket.upload_url = String::try_from(value).ok(),
-                Some("file_id") => ticket.file_id = String::try_from(value).ok(),
-                _ => {}
-            }
-        }
-        Some(ticket)
-    }
-}
-
 pub enum FileError {
     Retry(i64, &'static str),
     Failed(&'static str),
@@ -106,16 +76,6 @@ impl FileError {
         }
     }
 }
-fn rate_delay(reply: &reqwest::Response) -> i64 {
-    reply
-        .headers()
-        .get("retry-after")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(60)
-        .clamp(1, 86400)
-}
-
 pub async fn deliver(
     state: &AppState,
     pool: &PgPool,
@@ -170,27 +130,21 @@ pub async fn deliver(
     if !valid {
         return Err(FileError::Failed("notification image signature invalid"));
     }
-    let reply = crate::http_client::request(
-        &state.client,
-        "GET".into(),
-        format!(
-            "{}/files.getUploadURLExternal?filename={}&length={}",
-            state.settings.slack_api_base_url,
-            shiguredo_http11::uri::percent_encode_query(&file.name),
-            data.len()
-        ),
-        vec![(
-            "Authorization".into(),
-            format!("Bearer {}", state.settings.slack_bot_token),
-        )],
-        vec![],
-        false,
-    )
-    .send()
-    .await
-    .map_err(|_| FileError::Retry(60, "Slack upload preparation failed"))?;
+    let slack = SlackClient::new(&state.client, &state.settings);
+    let reply = slack
+        .get_upload_url(&file.name, data.len())
+        .send()
+        .await
+        .map_err(|_| FileError::Retry(60, "Slack upload preparation failed"))?;
     if reply.status().as_u16() == 429 {
-        return Err(FileError::Retry(rate_delay(&reply), "Slack rate limited"));
+        let retry_after = reply
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok());
+        return Err(FileError::Retry(
+            retry_after_secs(retry_after),
+            "Slack rate limited",
+        ));
     }
     if reply.status().as_u16() >= 500 {
         return Err(FileError::Retry(60, "Slack upload preparation unavailable"));
@@ -200,7 +154,7 @@ pub async fn deliver(
         .bytes()
         .await
         .ok()
-        .and_then(|body| UploadTicket::parse(&body))
+        .and_then(|body| SlackReplyBody::parse(&body))
         .ok_or(FileError::Retry(60, "invalid upload ticket response"))?;
     if !(200..300).contains(&ticket_status) || ticket.ok != Some(true) {
         return Err(FileError::Failed("Slack rejected upload ticket"));
@@ -209,17 +163,11 @@ pub async fn deliver(
         .upload_url
         .ok_or(FileError::Failed("upload URL missing"))?;
     let file_id = ticket.file_id.ok_or(FileError::Failed("file ID missing"))?;
-    let upload = crate::http_client::request(
-        &state.client,
-        "POST".into(),
-        url,
-        vec![("Content-Type".into(), "application/octet-stream".into())],
-        data,
-        false,
-    )
-    .send()
-    .await
-    .map_err(|_| FileError::Retry(60, "Slack file transfer failed"))?;
+    let upload = slack
+        .upload_content(url, data)
+        .send()
+        .await
+        .map_err(|_| FileError::Retry(60, "Slack file transfer failed"))?;
     if !(200..300).contains(&upload.status().as_u16()) {
         return Err(FileError::Retry(60, "Slack file transfer rejected"));
     }
@@ -234,25 +182,14 @@ pub async fn deliver(
     }
     *share_started = true;
     // ここからの通信失敗は共通の結果不明判定へ渡す。
-    match crate::http_client::request(
-        &state.client,
-        "POST".into(),
-        format!(
-            "{}/files.completeUploadExternal",
-            state.settings.slack_api_base_url
-        ),
-        vec![
-            (
-                "Authorization".into(),
-                format!("Bearer {}", state.settings.slack_bot_token),
-            ),
-            ("Content-Type".into(), "application/json".into()),
-        ],
-        complete_body(&file_id, &file.name, member("channel"), member("text")),
-        false,
-    )
-    .send()
-    .await
+    match slack
+        .post_json(
+            "files.completeUploadExternal",
+            "application/json",
+            complete_body(&file_id, &file.name, member("channel"), member("text")),
+        )
+        .send()
+        .await
     {
         Ok(reply) => Ok(reply),
         Err(_) => Err(FileError::Uncertain("Slack share response lost")),

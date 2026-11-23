@@ -1,0 +1,18 @@
+image ok: 200 "{\"ok\":true,\"files\":[{\"id\":\"F1\"}]}"
+  GET /files.getUploadURLExternal?filename=a%20b.png&length=13 authorization=Some("Bearer test-token") content-type=None body=""
+  POST /upload/1 authorization=None content-type=Some("application/octet-stream") body="�PNG\r\n\u{1a}\nimage"
+  POST /files.completeUploadExternal authorization=Some("Bearer test-token") content-type=Some("application/json") body="{\"files\":[{\"id\":\"F1\",\"title\":\"a b.png\"}],\"channel_id\":\"C1\"}"
+pdf default name: 200 "{\"ok\":true}"
+  GET /files.getUploadURLExternal?filename=document.pdf&length=8 authorization=Some("Bearer test-token") content-type=None body=""
+  POST /upload/2 authorization=None content-type=Some("application/octet-stream") body="%PDF-1.7"
+  POST /files.completeUploadExternal authorization=Some("Bearer test-token") content-type=Some("application/json") body="{\"files\":[{\"id\":\"F2\",\"title\":\"document.pdf\"}],\"channel_id\":\"C1\"}"
+ticket rejected: 500 {"type":"about:blank","title":"Internal Server Error","status":500,"detail":"Internal Server Error"}
+  GET /files.getUploadURLExternal?filename=image-upload.png&length=13 authorization=Some("Bearer test-token") content-type=None body=""
+share rejected: 500 {"type":"about:blank","title":"Internal Server Error","status":500,"detail":"Internal Server Error"}
+  GET /files.getUploadURLExternal?filename=image-upload.png&length=13 authorization=Some("Bearer test-token") content-type=None body=""
+  POST /upload/3 authorization=None content-type=Some("application/octet-stream") body="�PNG\r\n\u{1a}\nimage"
+  POST /files.completeUploadExternal authorization=Some("Bearer test-token") content-type=Some("application/json") body="{\"files\":[{\"id\":\"F3\",\"title\":\"image-upload.png\"}],\"channel_id\":\"C1\"}"
+share invalid json: 500 {"type":"about:blank","title":"Internal Server Error","status":500,"detail":"Internal Server Error"}
+  GET /files.getUploadURLExternal?filename=image-upload.png&length=13 authorization=Some("Bearer test-token") content-type=None body=""
+  POST /upload/4 authorization=None content-type=Some("application/octet-stream") body="�PNG\r\n\u{1a}\nimage"
+  POST /files.completeUploadExternal authorization=Some("Bearer test-token") content-type=Some("application/json") body="{\"files\":[{\"id\":\"F4\",\"title\":\"image-upload.png\"}],\"channel_id\":\"C1\"}"

@@ -795,3 +795,140 @@ async fn notification_error_strings_match_golden() {
     .unwrap();
     assert_golden("notification_errors.golden", &out);
 }
+
+/// ラベル・要求 URI・本文・上流が順に返す応答。
+type UploadCase<'a> = (&'a str, &'a str, &'a [u8], &'a [(u16, &'a str)]);
+
+/// 同期のファイル送信（`/slack/upload/{image,pdf}`）が Slack へ送る要求と、利用者への応答を固定する。
+#[tokio::test]
+async fn slack_upload_requests_match_golden() {
+    use std::fmt::Write;
+    let png = b"\x89PNG\r\n\x1a\nimage".to_vec();
+    let mut out = String::new();
+    // 上流は応答を順に返す。upload_url は上流自身を指す。
+    let cases: [UploadCase; 5] = [
+        (
+            "image ok",
+            "/slack/upload/image?channel=C1&file_name=a+b.png",
+            &png,
+            &[
+                (
+                    200,
+                    r#"{"ok":true,"upload_url":"<endpoint>/upload/1","file_id":"F1"}"#,
+                ),
+                (200, "OK - 5"),
+                (200, r#"{"ok":true,"files":[{"id":"F1"}]}"#),
+            ],
+        ),
+        (
+            "pdf default name",
+            "/slack/upload/pdf?channel=C1",
+            b"%PDF-1.7",
+            &[
+                (
+                    200,
+                    r#"{"ok":true,"upload_url":"<endpoint>/upload/2","file_id":"F2"}"#,
+                ),
+                (200, ""),
+                (200, r#"{"ok":true}"#),
+            ],
+        ),
+        (
+            "ticket rejected",
+            "/slack/upload/image?channel=C1",
+            &png,
+            &[(200, r#"{"ok":false,"error":"invalid_auth"}"#)],
+        ),
+        (
+            "share rejected",
+            "/slack/upload/image?channel=C1",
+            &png,
+            &[
+                (
+                    200,
+                    r#"{"ok":true,"upload_url":"<endpoint>/upload/3","file_id":"F3"}"#,
+                ),
+                (200, ""),
+                (200, r#"{"ok":false,"error":"channel_not_found"}"#),
+            ],
+        ),
+        (
+            "share invalid json",
+            "/slack/upload/image?channel=C1",
+            &png,
+            &[
+                (
+                    200,
+                    r#"{"ok":true,"upload_url":"<endpoint>/upload/4","file_id":"F4"}"#,
+                ),
+                (200, ""),
+                (200, "nope"),
+            ],
+        ),
+    ];
+    for (label, uri, body, replies) in cases {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let replies: Vec<(u16, String)> = replies
+            .iter()
+            .map(|(status, body)| (*status, body.replace("<endpoint>", &endpoint)))
+            .collect();
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut decoder = RequestDecoder::new();
+                let request = loop {
+                    if let Some(request) = decoder.decode().unwrap() {
+                        break request;
+                    }
+                    let mut buffer = [0; 4096];
+                    let n = socket.read(&mut buffer).await.unwrap();
+                    assert_ne!(n, 0);
+                    decoder.feed(&buffer[..n]).unwrap();
+                };
+                requests.push(request);
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let (mut state, _unused) = upstream(vec![]).await;
+        state.settings.slack_api_base_url = endpoint.clone();
+        let content_type = if uri.contains("pdf") {
+            "application/pdf"
+        } else {
+            "image/png"
+        };
+        let request = Request::new("POST", uri)
+            .header("Content-Type", content_type)
+            .body(body.to_vec());
+        let response = timeout(Duration::from_secs(5), process_request(request, &state))
+            .await
+            .unwrap();
+        let requests = task.await.unwrap();
+        writeln!(
+            out,
+            "{label}: {} {}",
+            response.status_code,
+            String::from_utf8_lossy(&response.body)
+        )
+        .unwrap();
+        for request in requests {
+            writeln!(
+                out,
+                "  {} {} authorization={:?} content-type={:?} body={:?}",
+                request.method,
+                request.uri,
+                request.get_header("authorization"),
+                request.get_header("content-type"),
+                String::from_utf8_lossy(&request.body)
+            )
+            .unwrap();
+        }
+    }
+    assert_golden("slack_upload.golden", &out);
+}
