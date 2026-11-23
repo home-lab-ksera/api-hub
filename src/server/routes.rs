@@ -150,7 +150,7 @@ pub(super) static ROUTES: &[Route] = {
         post("/s3/put_object_stream", E::S3PutObjectStream)
             .body(Body::Stream)
             .browser(),
-        post("/s3/put_object_and_notify", E::S3PutObjectAndNotify),
+        post("/s3/put_object_and_notify", E::S3PutObjectAndNotify).body(Body::Json(LARGE_BODY)),
         post("/s3/get_object_base64", E::S3GetObjectBase64).body(Body::Json(LARGE_BODY)),
         post("/s3/head_object", E::S3HeadObject),
         post("/s3/delete_object", E::S3DeleteObject),
@@ -342,6 +342,11 @@ mod tests {
     fn body_limits_follow_the_route() {
         assert_eq!(
             lookup("POST", "/s3/put_object_base64").body(),
+            Body::Json(LARGE_BODY)
+        );
+        // base64 のファイルを受け取る経路は、パス名によらず大きな上限にする。
+        assert_eq!(
+            lookup("POST", "/s3/put_object_and_notify").body(),
             Body::Json(LARGE_BODY)
         );
         assert_eq!(

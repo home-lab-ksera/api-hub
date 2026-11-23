@@ -18,8 +18,10 @@ HTTP サーバーは axum、外向きの HTTP は共有の reqwest Client です
 | 対象 | 上限 |
 |---|---|
 | JSON | 1MiB |
-| Base64 の API、Slack へのバイナリ upload | 64MiB |
+| Base64 の API（`put_object_and_notify` を含む）、Slack へのバイナリ upload | 64MiB |
 | ストリーミング upload | 全量をメモリに持たない。8MiB ずつ multipart にする |
+
+経路ごとの上限は `src/server/routes.rs` の表で決めます。表にない経路は JSON と同じ扱いです。
 
 - preview は、reqwest の body stream を backpressure を保ったまま axum の Body へ渡します。
 - ストリーミング upload は、読み取りが 60 秒停滞したら multipart を abort します。明示的な失敗、切断、完了の失敗でも abort します。
