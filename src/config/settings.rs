@@ -66,6 +66,24 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// テスト用の設定。Slack と S3 はどちらも `endpoint` を向く。
+    #[doc(hidden)]
+    pub fn for_test(endpoint: &str) -> Self {
+        Self {
+            slack_bot_token: "test-token".into(),
+            slack_api_base_url: endpoint.into(),
+            s3_access_key_id: "test".into(),
+            s3_secret_access_key: "test".into(),
+            s3_region: "us-east-1".into(),
+            s3_endpoint: Some(endpoint.into()),
+            s3_browser_endpoint: None,
+            s3_use_path_style: true,
+            s3_session_token: None,
+        }
+    }
+}
+
 fn parse_bool_env(name: &str, default_value: bool) -> bool {
     match env::var(name) {
         Ok(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),

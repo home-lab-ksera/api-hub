@@ -14,15 +14,8 @@ fn state(endpoint: Option<String>) -> AppState {
         database: None,
         client: http_client::new(),
         settings: Settings {
-            slack_bot_token: "fixture".into(),
-            slack_api_base_url: "http://127.0.0.1:1".into(),
-            s3_access_key_id: "fixture".into(),
-            s3_secret_access_key: "fixture".into(),
-            s3_region: "us-east-1".into(),
             s3_endpoint: endpoint,
-            s3_browser_endpoint: None,
-            s3_use_path_style: true,
-            s3_session_token: None,
+            ..Settings::for_test("http://127.0.0.1:1")
         },
     }
 }

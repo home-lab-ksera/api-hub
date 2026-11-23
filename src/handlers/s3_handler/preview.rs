@@ -1,10 +1,10 @@
 //! ブラウザ向けの preview 応答（ヘッダーの組み立てと検証）。
 
 use super::*;
+use crate::http_client::find_header;
 
 pub struct PreviewObjectStreamResponse {
     pub status_code: u16,
-    pub reason_phrase: &'static str,
     pub headers: Vec<(String, String)>,
     pub body_stream: reqwest::Response,
 }
@@ -15,17 +15,19 @@ pub async fn preview_object_stream(
     key: String,
     request_headers: &[(String, String)],
 ) -> Result<PreviewObjectStreamResponse, ApiError> {
+    // 条件付き GET と Range は、そのまま S3 へ渡す。
+    let forward = |name: &str| find_header(request_headers, name).map(str::to_owned);
     let s3_response = s3_service::get_object_proxy_stream(
         &app_state.client,
         &app_state.settings,
         ProxyObjectStreamInput {
             bucket,
             key: key.clone(),
-            range: extract_forward_header(request_headers, "range"),
-            if_match: extract_forward_header(request_headers, "if-match"),
-            if_none_match: extract_forward_header(request_headers, "if-none-match"),
-            if_modified_since: extract_forward_header(request_headers, "if-modified-since"),
-            if_unmodified_since: extract_forward_header(request_headers, "if-unmodified-since"),
+            range: forward("range"),
+            if_match: forward("if-match"),
+            if_none_match: forward("if-none-match"),
+            if_modified_since: forward("if-modified-since"),
+            if_unmodified_since: forward("if-unmodified-since"),
         },
     )
     .await?;
@@ -38,17 +40,9 @@ pub async fn preview_object_stream(
 
     Ok(PreviewObjectStreamResponse {
         status_code: s3_response.status().as_u16(),
-        reason_phrase: response_reason(s3_response.status().as_u16()),
         headers,
         body_stream: s3_response,
     })
-}
-
-pub(super) fn extract_forward_header(headers: &[(String, String)], name: &str) -> Option<String> {
-    headers
-        .iter()
-        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.clone())
 }
 
 pub(super) fn build_preview_response_headers(
@@ -80,7 +74,7 @@ pub(super) fn build_preview_response_headers(
         headers.push((name.clone(), value.clone()));
     }
 
-    if should_force_pdf_preview(get_header_value(&headers, "content-type"), key) {
+    if should_force_pdf_preview(find_header(&headers, "content-type"), key) {
         upsert_header(&mut headers, "Content-Type", "application/pdf");
         let file_name = sanitize_pdf_filename(key);
         upsert_header(
@@ -93,7 +87,7 @@ pub(super) fn build_preview_response_headers(
     // 保存された Content-Type を信用して HTML などを api-hub のオリジンで表示しない。
     upsert_header(&mut headers, "X-Content-Type-Options", "nosniff");
     // 304 は本文も Content-Type も持たないため、保存済みの応答ヘッダーを書き換えない。
-    let content_type = get_header_value(&headers, "content-type");
+    let content_type = find_header(&headers, "content-type");
     if status_code != 304 && !content_type.is_some_and(is_inline_media) {
         if content_type.is_none() {
             upsert_header(&mut headers, "Content-Type", "application/octet-stream");
@@ -107,13 +101,6 @@ pub(super) fn build_preview_response_headers(
     }
 
     headers
-}
-
-pub(super) fn get_header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    headers
-        .iter()
-        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
 }
 
 pub(super) fn upsert_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
@@ -151,21 +138,6 @@ pub(super) fn is_inline_media(content_type: &str) -> bool {
         )
         || media.starts_with("video/")
         || media.starts_with("audio/")
-}
-
-pub(super) fn response_reason(status_code: u16) -> &'static str {
-    match status_code {
-        200 => "OK",
-        206 => "Partial Content",
-        304 => "Not Modified",
-        400 => "Bad Request",
-        403 => "Forbidden",
-        404 => "Not Found",
-        416 => "Range Not Satisfiable",
-        500 => "Internal Server Error",
-        502 => "Bad Gateway",
-        _ => "OK",
-    }
 }
 
 pub(super) fn is_valid_header_name(name: &str) -> bool {

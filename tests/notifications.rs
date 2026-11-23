@@ -61,15 +61,8 @@ async fn durable_notifications() {
         database: Some(pool.clone()),
         client: api_hub::http_client::new(),
         settings: Settings {
-            slack_bot_token: "test".into(),
-            slack_api_base_url: format!("http://{}", listener.local_addr().unwrap()),
-            s3_access_key_id: "test".into(),
-            s3_secret_access_key: "test".into(),
-            s3_region: "us-east-1".into(),
             s3_endpoint: None,
-            s3_browser_endpoint: None,
-            s3_use_path_style: true,
-            s3_session_token: None,
+            ..Settings::for_test(&format!("http://{}", listener.local_addr().unwrap()))
         },
     };
     let item = Notification {
@@ -592,15 +585,8 @@ async fn notification_api_matches_golden() {
         database: Some(pool.clone()),
         client: api_hub::http_client::new(),
         settings: Settings {
-            slack_bot_token: "test".into(),
-            slack_api_base_url: "http://127.0.0.1:9".into(),
-            s3_access_key_id: "test".into(),
-            s3_secret_access_key: "test".into(),
-            s3_region: "us-east-1".into(),
             s3_endpoint: None,
-            s3_browser_endpoint: None,
-            s3_use_path_style: true,
-            s3_session_token: None,
+            ..Settings::for_test("http://127.0.0.1:9")
         },
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -975,17 +961,7 @@ async fn delivery_outcomes_match_golden() {
         let state = AppState {
             database: Some(pool.clone()),
             client: api_hub::http_client::new(),
-            settings: Settings {
-                slack_bot_token: "test".into(),
-                slack_api_base_url: endpoint.clone(),
-                s3_access_key_id: "test".into(),
-                s3_secret_access_key: "test".into(),
-                s3_region: "us-east-1".into(),
-                s3_endpoint: Some(endpoint),
-                s3_browser_endpoint: None,
-                s3_use_path_style: true,
-                s3_session_token: None,
-            },
+            settings: Settings::for_test(&endpoint),
         };
         let item = Notification {
             producer: "golden".into(),

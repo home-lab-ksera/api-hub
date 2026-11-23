@@ -1,7 +1,5 @@
-use super::{
-    delete_objects_input, extract_forward_header, list_objects_v2_input, parse_body,
-    presigned_object_input,
-};
+use super::{delete_objects_input, list_objects_v2_input, parse_body, presigned_object_input};
+use crate::http_client::find_header;
 use proptest::{prelude::ProptestConfig, prop_assert_eq, proptest};
 
 #[test]
@@ -64,20 +62,20 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
-    fn extract_forward_header_is_case_insensitive(value in "[ -~]{0,64}") {
+    fn find_header_is_case_insensitive(value in "[ -~]{0,64}") {
         let headers = vec![
             ("RaNgE".to_string(), value.clone()),
             ("x-request-id".to_string(), "req-1".to_string()),
         ];
 
-        let extracted = extract_forward_header(&headers, "range");
+        let extracted = find_header(&headers, "range").map(str::to_owned);
         prop_assert_eq!(extracted, Some(value));
     }
 }
 
 #[test]
 fn preview_never_renders_stored_documents_in_the_api_origin() {
-    use super::{build_preview_response_headers, get_header_value};
+    use super::build_preview_response_headers;
     let source = |content_type: &str| vec![("Content-Type".to_string(), content_type.to_string())];
 
     for content_type in [
@@ -88,26 +86,26 @@ fn preview_never_renders_stored_documents_in_the_api_origin() {
     ] {
         let headers = build_preview_response_headers(&source(content_type), "a/page", 200);
         assert_eq!(
-            get_header_value(&headers, "content-disposition"),
+            find_header(&headers, "content-disposition"),
             Some("attachment")
         );
         assert_eq!(
-            get_header_value(&headers, "content-security-policy"),
+            find_header(&headers, "content-security-policy"),
             Some("sandbox; default-src 'none'")
         );
         assert_eq!(
-            get_header_value(&headers, "x-content-type-options"),
+            find_header(&headers, "x-content-type-options"),
             Some("nosniff")
         );
     }
     // Content-Type がない本文も、ブラウザーに種類を推測させない。
     let headers = build_preview_response_headers(&[], "a/page", 200);
     assert_eq!(
-        get_header_value(&headers, "content-type"),
+        find_header(&headers, "content-type"),
         Some("application/octet-stream")
     );
     assert_eq!(
-        get_header_value(&headers, "content-disposition"),
+        find_header(&headers, "content-disposition"),
         Some("attachment")
     );
 
@@ -120,18 +118,18 @@ fn preview_never_renders_stored_documents_in_the_api_origin() {
         for status in [200, 206] {
             let headers = build_preview_response_headers(&source(content_type), key, status);
             assert_ne!(
-                get_header_value(&headers, "content-disposition"),
+                find_header(&headers, "content-disposition"),
                 Some("attachment")
             );
-            assert_eq!(get_header_value(&headers, "content-security-policy"), None);
+            assert_eq!(find_header(&headers, "content-security-policy"), None);
             assert_eq!(
-                get_header_value(&headers, "x-content-type-options"),
+                find_header(&headers, "x-content-type-options"),
                 Some("nosniff")
             );
         }
     }
     // 304 は保存済み応答の表示方法を変えない。
     let headers = build_preview_response_headers(&[], "hitomi/a_prev.jpg", 304);
-    assert_eq!(get_header_value(&headers, "content-disposition"), None);
-    assert_eq!(get_header_value(&headers, "content-type"), None);
+    assert_eq!(find_header(&headers, "content-disposition"), None);
+    assert_eq!(find_header(&headers, "content-type"), None);
 }

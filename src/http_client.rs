@@ -71,3 +71,11 @@ pub fn headers(response: &reqwest::Response) -> Vec<(String, String)> {
         })
         .collect()
 }
+
+/// 名前の大文字小文字を区別せずにヘッダーを探し、最初の値を返す。
+pub fn find_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
