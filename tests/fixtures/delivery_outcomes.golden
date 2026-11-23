@@ -1,0 +1,19 @@
+text sent: state=sent attempts=1 delay=0 slack_ts=Some("1.2") slack_file_id=None last_error=None released=true
+text api error: state=failed attempts=1 delay=0 slack_ts=None slack_file_id=None last_error=Some("channel_not_found") released=true
+text ratelimited code: state=retry attempts=1 delay=60 slack_ts=None slack_file_id=None last_error=Some("ratelimited") released=true
+text 429: state=retry attempts=1 delay=7 slack_ts=None slack_file_id=None last_error=Some("slack rate limited") released=true
+text 429 at limit: state=failed attempts=8 delay=0 slack_ts=None slack_file_id=None last_error=Some("slack rate limited") released=true
+text 500: state=uncertain attempts=1 delay=0 slack_ts=None slack_file_id=None last_error=Some("Slack HTTP 500; verify before retry") released=true
+text 404: state=failed attempts=1 delay=0 slack_ts=None slack_file_id=None last_error=Some("Slack HTTP 404") released=true
+text invalid body: state=uncertain attempts=1 delay=0 slack_ts=None slack_file_id=None last_error=Some("invalid Slack response; verify before retry") released=true
+text disconnect: state=uncertain attempts=1 delay=0 slack_ts=None slack_file_id=None last_error=Some("transport failure; verify Slack before retry") released=true
+file sent: state=sent attempts=1 delay=0 slack_ts=Some("1.2") slack_file_id=Some("F1") last_error=None released=true
+file image missing: state=failed attempts=1 delay=0 slack_ts=None slack_file_id=None last_error=Some("notification image expired or missing") released=true
+file storage error: state=retry attempts=1 delay=60 slack_ts=None slack_file_id=None last_error=Some("image storage unavailable") released=true
+file storage error at limit: state=failed attempts=8 delay=0 slack_ts=None slack_file_id=None last_error=Some("image storage unavailable") released=true
+file bad signature: state=failed attempts=1 delay=0 slack_ts=None slack_file_id=None last_error=Some("notification image signature invalid") released=true
+file ticket 429: state=retry attempts=1 delay=9 slack_ts=None slack_file_id=None last_error=Some("Slack rate limited") released=true
+file ticket rejected: state=failed attempts=1 delay=0 slack_ts=None slack_file_id=None last_error=Some("Slack rejected upload ticket") released=true
+file transfer rejected: state=retry attempts=1 delay=60 slack_ts=None slack_file_id=None last_error=Some("Slack file transfer rejected") released=true
+file share 500: state=uncertain attempts=1 delay=0 slack_ts=None slack_file_id=Some("F1") last_error=Some("Slack HTTP 500; verify before retry") released=true
+file share disconnect: state=uncertain attempts=1 delay=0 slack_ts=None slack_file_id=Some("F1") last_error=Some("Slack share response lost") released=true
