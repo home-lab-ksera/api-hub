@@ -12,11 +12,6 @@ pub struct GetObjectInput {
     pub key: String,
 }
 
-pub struct ProxyObjectInput {
-    pub bucket: String,
-    pub key: String,
-}
-
 pub struct ProxyObjectStreamInput {
     pub bucket: String,
     pub key: String,

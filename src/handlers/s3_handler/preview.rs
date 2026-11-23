@@ -9,36 +9,6 @@ pub struct PreviewObjectStreamResponse {
     pub body_stream: reqwest::Response,
 }
 
-pub async fn preview_object(
-    app_state: &AppState,
-    bucket: String,
-    key: String,
-) -> Result<Response, ApiError> {
-    let s3_response = s3_service::get_object_proxy(
-        &app_state.client,
-        &app_state.settings,
-        ProxyObjectInput {
-            bucket,
-            key: key.clone(),
-        },
-    )
-    .await?;
-
-    let mut response = Response::new(
-        s3_response.status_code,
-        response_reason(s3_response.status_code),
-    )
-    .body(s3_response.body);
-
-    for (name, value) in
-        build_preview_response_headers(&s3_response.headers, &key, s3_response.status_code)
-    {
-        response.add_header(&name, &value);
-    }
-
-    Ok(response)
-}
-
 pub async fn preview_object_stream(
     app_state: &AppState,
     bucket: String,

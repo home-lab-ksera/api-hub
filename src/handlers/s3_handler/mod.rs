@@ -5,10 +5,10 @@ use crate::{
     errors::api_error::ApiError,
     service::s3_service::{
         self, AbortMultipartUploadInput, CompleteMultipartUploadInput, CompletePartInput,
-        CreateBucketInput, CreateMultipartUploadInput, DeleteBucketInput,
+        CopyObjectInput, CreateBucketInput, CreateMultipartUploadInput, DeleteBucketInput,
         DeleteObjectIdentifierInput, DeleteObjectInput, DeleteObjectsInput, GetObjectInput,
         HeadBucketInput, HeadObjectInput, ListMultipartUploadsInput, ListObjectsV2Input,
-        ListPartsInput, PresignedObjectInput, ProxyObjectInput, ProxyObjectStreamInput,
+        ListPartsInput, ObjectTaggingInput, PresignedObjectInput, ProxyObjectStreamInput,
         PutObjectInput, UploadPartInput,
     },
 };
@@ -20,7 +20,7 @@ mod requests;
 pub use buckets::*;
 pub use multipart::*;
 pub use preview::*;
-pub use requests::*;
+pub(in crate::handlers) use requests::*;
 
 pub(super) fn json_response(body: String) -> Response {
     Response::new(200, "OK")
@@ -29,123 +29,53 @@ pub(super) fn json_response(body: String) -> Response {
 }
 
 pub async fn put_object_base64(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_put_object_base64_request(&body)?;
-    let body = s3_service::decode_base64_payload(&payload.file_data_base64)?;
-    let result = s3_service::put_object(
-        &app_state.client,
-        &app_state.settings,
-        PutObjectInput {
-            bucket: payload.bucket,
-            key: payload.key,
-            body,
-            content_type: payload.content_type,
-        },
-    )
-    .await?;
-    Ok(json_response(result))
+    let input = parse_body(body, put_object_base64_input)?;
+    Ok(json_response(
+        s3_service::put_object(&app_state.client, &app_state.settings, input).await?,
+    ))
 }
 
 pub async fn get_object_base64(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_get_object_request(&body)?;
-    let result = s3_service::get_object(
-        &app_state.client,
-        &app_state.settings,
-        GetObjectInput {
-            bucket: payload.bucket,
-            key: payload.key,
-        },
-    )
-    .await?;
-    Ok(json_response(result))
+    let input = parse_body(body, get_object_input)?;
+    Ok(json_response(
+        s3_service::get_object(&app_state.client, &app_state.settings, input).await?,
+    ))
 }
 
 pub async fn head_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_head_object_request(&body)?;
-    let result = s3_service::head_object(
-        &app_state.client,
-        &app_state.settings,
-        HeadObjectInput {
-            bucket: payload.bucket,
-            key: payload.key,
-        },
-    )
-    .await?;
-    Ok(json_response(result))
+    let input = parse_body(body, head_object_input)?;
+    Ok(json_response(
+        s3_service::head_object(&app_state.client, &app_state.settings, input).await?,
+    ))
 }
 
 pub async fn delete_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_delete_object_request(&body)?;
-    let result = s3_service::delete_object(
-        &app_state.client,
-        &app_state.settings,
-        DeleteObjectInput {
-            bucket: payload.bucket,
-            key: payload.key,
-        },
-    )
-    .await?;
-    Ok(json_response(result))
+    let input = parse_body(body, delete_object_input)?;
+    Ok(json_response(
+        s3_service::delete_object(&app_state.client, &app_state.settings, input).await?,
+    ))
 }
 
 pub async fn delete_objects(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_delete_objects_request(&body)?;
-    let objects = payload
-        .objects
-        .into_iter()
-        .map(|object| DeleteObjectIdentifierInput {
-            key: object.key,
-            version_id: object.version_id,
-        })
-        .collect::<Vec<_>>();
-    let result = s3_service::delete_objects(
-        &app_state.client,
-        &app_state.settings,
-        DeleteObjectsInput {
-            bucket: payload.bucket,
-            objects,
-            quiet: payload.quiet.unwrap_or(false),
-        },
-    )
-    .await?;
-    Ok(json_response(result))
+    let input = parse_body(body, delete_objects_input)?;
+    Ok(json_response(
+        s3_service::delete_objects(&app_state.client, &app_state.settings, input).await?,
+    ))
 }
 
 pub async fn list_objects_v2(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_list_objects_v2_request(&body)?;
-    let result = s3_service::list_objects_v2(
-        &app_state.client,
-        &app_state.settings,
-        ListObjectsV2Input {
-            bucket: payload.bucket,
-            prefix: payload.prefix,
-            delimiter: payload.delimiter,
-            max_keys: payload.max_keys,
-            start_after: payload.start_after,
-            continuation_token: payload.continuation_token,
-        },
-    )
-    .await?;
-    Ok(json_response(result))
+    let input = parse_body(body, list_objects_v2_input)?;
+    Ok(json_response(
+        s3_service::list_objects_v2(&app_state.client, &app_state.settings, input).await?,
+    ))
 }
 
 pub async fn presigned_get_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_presigned_object_request(&body)?;
-    let result = s3_service::presigned_get(
+    let input = parse_body(body, presigned_object_input)?;
+    Ok(json_response(s3_service::presigned_get(
         &app_state.settings,
-        PresignedObjectInput {
-            bucket: payload.bucket,
-            key: payload.key,
-            expires_in_secs: payload.expires_in_secs.unwrap_or(900),
-        },
-    )?;
-    Ok(json_response(result))
+        input,
+    )?))
 }
 
 // home-cameraのUTC日付フォルダに保存されたMP4だけを配信対象にする。
@@ -187,7 +117,7 @@ mod camera_viewer_tests {
 
 /// 内部viewer専用。通常のS3 APIとは別に、公開する保存領域と署名期限を固定する。
 pub async fn browser_get_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let payload = parse_get_object_request(&body_to_utf8(body)?)?;
+    let payload = parse_body(body, get_object_input)?;
     let allowed = ((payload.bucket == "pdfs"
         && ((payload.key.starts_with("hitomi/")
             && (payload.key.ends_with(".pdf") || payload.key.ends_with("_prev.jpg")))
@@ -235,17 +165,11 @@ pub async fn browser_get_object(app_state: &AppState, body: &[u8]) -> Result<Res
 }
 
 pub async fn presigned_put_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_presigned_object_request(&body)?;
-    let result = s3_service::presigned_put(
+    let input = parse_body(body, presigned_object_input)?;
+    Ok(json_response(s3_service::presigned_put(
         &app_state.settings,
-        PresignedObjectInput {
-            bucket: payload.bucket,
-            key: payload.key,
-            expires_in_secs: payload.expires_in_secs.unwrap_or(900),
-        },
-    )?;
-    Ok(json_response(result))
+        input,
+    )?))
 }
 
 pub fn s3_preflight() -> Response {
@@ -253,45 +177,23 @@ pub fn s3_preflight() -> Response {
 }
 
 pub async fn copy_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let json = parse_json_body(&body)?;
-    let root = json.value();
-    let input = s3_service::CopyObjectInput {
-        bucket: nonempty_string(root, "bucket")?,
-        key: nonempty_string(root, "key")?,
-        source_bucket: nonempty_string(root, "source_bucket")?,
-        source_key: nonempty_string(root, "source_key")?,
-        source_version_id: get_optional_string(root, "source_version_id")?,
-    };
+    let input = parse_body(body, copy_object_input)?;
     Ok(json_response(
         s3_service::copy_object(&app_state.client, &app_state.settings, input).await?,
     ))
 }
 
 pub async fn get_object_tagging(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let json = parse_json_body(&body)?;
-    let root = json.value();
-    let input = s3_service::ObjectTaggingInput {
-        bucket: nonempty_string(root, "bucket")?,
-        key: nonempty_string(root, "key")?,
-        version_id: get_optional_string(root, "version_id")?,
-    };
+    let input = parse_body(body, object_tagging_input)?;
     Ok(json_response(
         s3_service::get_object_tagging(&app_state.client, &app_state.settings, input).await?,
     ))
 }
 
 pub async fn put_object_tagging(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let json = parse_json_body(&body)?;
-    let root = json.value();
-    let input = s3_service::ObjectTaggingInput {
-        bucket: nonempty_string(root, "bucket")?,
-        key: nonempty_string(root, "key")?,
-        version_id: get_optional_string(root, "version_id")?,
-    };
-    let tags = parse_tags(root)?;
+    let (input, tags) = parse_body(body, |root| {
+        Ok((object_tagging_input(root)?, parse_tags(root)?))
+    })?;
     Ok(json_response(
         s3_service::put_object_tagging(&app_state.client, &app_state.settings, input, tags).await?,
     ))
@@ -301,14 +203,7 @@ pub async fn delete_object_tagging(
     app_state: &AppState,
     body: &[u8],
 ) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let json = parse_json_body(&body)?;
-    let root = json.value();
-    let input = s3_service::ObjectTaggingInput {
-        bucket: nonempty_string(root, "bucket")?,
-        key: nonempty_string(root, "key")?,
-        version_id: get_optional_string(root, "version_id")?,
-    };
+    let input = parse_body(body, object_tagging_input)?;
     Ok(json_response(
         s3_service::delete_object_tagging(&app_state.client, &app_state.settings, input).await?,
     ))
@@ -320,20 +215,40 @@ pub async fn put_object_and_notify(
     app_state: &AppState,
     body: &[u8],
 ) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_put_object_base64_request(&body)?;
-    let json = parse_json_body(&body)?;
-    let root = json.value();
-    let channel = nonempty_string(root, "channel")?;
-    nonempty_string(root, "bucket")?;
-    nonempty_string(root, "key")?;
-    let expires = get_optional_u64(root, "expires_in_secs")?.unwrap_or(900);
-    if !(1..=604800).contains(&expires) {
-        return Err(ApiError::BadRequest(
-            "expires_in_secs must be between 1 and 604800".into(),
-        ));
+    struct Notify {
+        bucket: String,
+        key: String,
+        file_data_base64: String,
+        content_type: Option<String>,
+        channel: String,
+        expires_in_secs: u64,
+        text: String,
     }
-    let text = get_optional_string(root, "text")?.unwrap_or_else(|| "File uploaded".into());
+    let payload = parse_body(body, |root| {
+        let bucket = required(root, "bucket")?;
+        let key = required(root, "key")?;
+        let file_data_base64 = required(root, "file_data_base64")?;
+        let content_type = optional(root, "content_type")?;
+        let channel = nonempty_string(root, "channel")?;
+        nonempty_string(root, "bucket")?;
+        nonempty_string(root, "key")?;
+        let expires_in_secs = optional(root, "expires_in_secs")?.unwrap_or(900);
+        if !(1..=604800).contains(&expires_in_secs) {
+            return Err(ApiError::BadRequest(
+                "expires_in_secs must be between 1 and 604800".into(),
+            ));
+        }
+        let text = optional(root, "text")?.unwrap_or_else(|| "File uploaded".into());
+        Ok(Notify {
+            bucket,
+            key,
+            file_data_base64,
+            content_type,
+            channel,
+            expires_in_secs,
+            text,
+        })
+    })?;
     let data = s3_service::decode_base64_payload(&payload.file_data_base64)?;
     // Validate signing configuration before the upload has any side effects.
     let signed = s3_service::presigned_get(
@@ -341,11 +256,11 @@ pub async fn put_object_and_notify(
         PresignedObjectInput {
             bucket: payload.bucket.clone(),
             key: payload.key.clone(),
-            expires_in_secs: expires,
+            expires_in_secs: payload.expires_in_secs,
         },
     )?;
     let signed_json = parse_json_body(&signed)?;
-    let url = get_required_string(signed_json.value(), "url")?;
+    let url: String = required(signed_json.value(), "url")?;
     let result = s3_service::put_object(
         &app_state.client,
         &app_state.settings,
@@ -362,8 +277,8 @@ pub async fn put_object_and_notify(
         &app_state.client,
         &app_state.settings.slack_bot_token,
         &app_state.settings.slack_api_base_url,
-        &channel,
-        &format!("{text}\n{url}"),
+        &payload.channel,
+        &format!("{}\n{url}", payload.text),
     )
     .await;
     let (slack_response, notification_error) = match notification {

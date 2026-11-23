@@ -38,6 +38,7 @@ cargo run --bin api-hub -- --migrate # api_hub DB の migration だけを実行�
 DB の設定は必須ですが、接続は必要になったときに行います。DB が一時的に止まっていても、S3 の API は起動します。
 
 ログは標準出力に JSONL で出します（1 行 1 JSON、リクエスト ID 付き）。`jq 'select(.level == "ERROR")'` などで絞り込めます。
+すべての要求に `http::request` と `http::response` のアクセスログが出ます。API のエラーは、利用者の誤り（4xx）が `WARN`、サーバーの障害（5xx）が `ERROR` です。
 
 ## API
 

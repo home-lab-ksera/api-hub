@@ -11,21 +11,21 @@ struct UploadQuery {
 }
 
 fn message_payload(body: &str, update: bool) -> Result<String, ApiError> {
-    use super::s3_handler::{get_optional_string, get_required_string};
+    use super::s3_handler::{optional, required};
     let json = nojson::RawJson::parse(body)
         .map_err(|e| ApiError::BadRequest(format!("Invalid JSON: {e}")))?;
     let root = json.value();
-    let channel = get_required_string(root, "channel")?;
-    let text = get_required_string(root, "text")?;
+    let channel: String = required(root, "channel")?;
+    let text: String = required(root, "text")?;
     if channel.trim().is_empty() || text.trim().is_empty() {
         return Err(ApiError::BadRequest(
             "channel and text must not be empty".into(),
         ));
     }
     let ts = if update {
-        Some(get_required_string(root, "ts")?)
+        Some(required::<String>(root, "ts")?)
     } else {
-        get_optional_string(root, "thread_ts")?
+        optional::<String>(root, "thread_ts")?
     };
     if ts.as_ref().is_some_and(|v| v.trim().is_empty()) {
         return Err(ApiError::BadRequest(
@@ -42,7 +42,7 @@ fn message_payload(body: &str, update: bool) -> Result<String, ApiError> {
             .map_err(|_| ApiError::BadRequest("blocks must be an array".into()))?;
         let mut count = 0;
         for block in blocks {
-            get_required_string(block, "type")?;
+            required::<String>(block, "type")?;
             count += 1;
         }
         if count > 50 {
