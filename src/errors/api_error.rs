@@ -1,5 +1,5 @@
 use shiguredo_http11::Response;
-use tracing::error;
+use tracing::{error, warn};
 
 #[derive(Debug)]
 pub enum ApiError {
@@ -45,52 +45,42 @@ pub fn problem_details_response(status_code: u16, detail: impl Into<String>) -> 
 }
 
 impl ApiError {
-    pub fn into_response(self) -> Response {
+    pub fn status_code(&self) -> u16 {
         match self {
-            ApiError::BadRequest(ref message) => {
-                error!(
-                    error_type = "bad_request",
-                    message = %message,
-                    status = 400,
-                    "API error occurred"
-                );
-                problem_details_response(400, message.clone())
+            Self::BadRequest(_) => 400,
+            Self::Forbidden(_) => 403,
+            Self::NotFound(_) => 404,
+            Self::MethodNotAllowed(_) => 405,
+            Self::InternalServerError(_) => 500,
+        }
+    }
+
+    fn error_type(&self) -> &'static str {
+        match self {
+            Self::BadRequest(_) => "bad_request",
+            Self::Forbidden(_) => "forbidden",
+            Self::NotFound(_) => "not_found",
+            Self::MethodNotAllowed(_) => "method_not_allowed",
+            Self::InternalServerError(_) => "internal_server_error",
+        }
+    }
+
+    /// 利用者の誤りは warn、サーバーの障害は error で記録する。
+    /// 内部エラーの詳細はログにだけ残し、応答には含めない。
+    pub fn into_response(self) -> Response {
+        let status = self.status_code();
+        let error_type = self.error_type();
+        match self {
+            Self::InternalServerError(details) => {
+                error!(error_type, details = %details, status, "API error occurred");
+                problem_details_response(status, "Internal Server Error")
             }
-            ApiError::Forbidden(ref message) => {
-                error!(
-                    error_type = "forbidden",
-                    message = %message,
-                    status = 403,
-                    "API error occurred"
-                );
-                problem_details_response(403, message.clone())
-            }
-            ApiError::NotFound(ref message) => {
-                error!(
-                    error_type = "not_found",
-                    message = %message,
-                    status = 404,
-                    "API error occurred"
-                );
-                problem_details_response(404, message.clone())
-            }
-            ApiError::MethodNotAllowed(ref message) => {
-                error!(
-                    error_type = "method_not_allowed",
-                    message = %message,
-                    status = 405,
-                    "API error occurred"
-                );
-                problem_details_response(405, message.clone())
-            }
-            ApiError::InternalServerError(ref details) => {
-                error!(
-                    error_type = "internal_server_error",
-                    details = %details,
-                    status = 500,
-                    "API error occurred"
-                );
-                problem_details_response(500, "Internal Server Error")
+            Self::BadRequest(message)
+            | Self::Forbidden(message)
+            | Self::NotFound(message)
+            | Self::MethodNotAllowed(message) => {
+                warn!(error_type, message = %message, status, "API error occurred");
+                problem_details_response(status, message)
             }
         }
     }
