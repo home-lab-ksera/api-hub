@@ -7,13 +7,12 @@ pub async fn list_buckets(
     settings: &Settings,
 ) -> Result<String, ApiError> {
     let s3 = create_s3_client(settings)?;
-    let request = s3
-        .list_buckets()
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::ListBucketsFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        s3.list_buckets().build_request(),
+        shiguredo_s3::api::ListBucketsFluentBuilder::parse_response,
+    )
+    .await?;
 
     Ok(nojson::json(|f| {
         f.object(|f| {
@@ -44,14 +43,12 @@ pub async fn create_bucket(
     input: CreateBucketInput,
 ) -> Result<String, ApiError> {
     let s3 = create_s3_client(settings)?;
-    let request = s3
-        .create_bucket()
-        .bucket(input.bucket)
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::CreateBucketFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        s3.create_bucket().bucket(input.bucket).build_request(),
+        shiguredo_s3::api::CreateBucketFluentBuilder::parse_response,
+    )
+    .await?;
 
     Ok(nojson::json(|f| f.object(|f| f.member("location", &output.location))).to_string())
 }
@@ -62,14 +59,12 @@ pub async fn head_bucket(
     input: HeadBucketInput,
 ) -> Result<String, ApiError> {
     let s3 = create_s3_client(settings)?;
-    let request = s3
-        .head_bucket()
-        .bucket(input.bucket)
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::HeadBucketFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        s3.head_bucket().bucket(input.bucket).build_request(),
+        shiguredo_s3::api::HeadBucketFluentBuilder::parse_response,
+    )
+    .await?;
 
     Ok(
         nojson::json(|f| f.object(|f| f.member("bucket_region", &output.bucket_region)))
@@ -83,14 +78,12 @@ pub async fn delete_bucket(
     input: DeleteBucketInput,
 ) -> Result<String, ApiError> {
     let s3 = create_s3_client(settings)?;
-    let request = s3
-        .delete_bucket()
-        .bucket(input.bucket)
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    shiguredo_s3::api::DeleteBucketFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    send(
+        http_client,
+        s3.delete_bucket().bucket(input.bucket).build_request(),
+        shiguredo_s3::api::DeleteBucketFluentBuilder::parse_response,
+    )
+    .await?;
 
     Ok(nojson::json(|f| f.object(|f| f.member("deleted", true))).to_string())
 }

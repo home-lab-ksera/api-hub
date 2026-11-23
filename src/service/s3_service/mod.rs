@@ -32,12 +32,12 @@ pub async fn put_object(
         req = req.content_type(content_type);
     }
 
-    let request = req
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::PutObjectFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        req.build_request(),
+        shiguredo_s3::api::PutObjectFluentBuilder::parse_response,
+    )
+    .await?;
 
     Ok(nojson::json(|f| {
         f.object(|f| {
@@ -54,15 +54,15 @@ pub async fn get_object(
     input: GetObjectInput,
 ) -> Result<String, ApiError> {
     let s3 = create_s3_client(settings)?;
-    let request = s3
-        .get_object()
-        .bucket(input.bucket)
-        .key(input.key)
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::GetObjectFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        s3.get_object()
+            .bucket(input.bucket)
+            .key(input.key)
+            .build_request(),
+        shiguredo_s3::api::GetObjectFluentBuilder::parse_response,
+    )
+    .await?;
 
     Ok(nojson::json(|f| {
         f.object(|f| {
@@ -76,21 +76,6 @@ pub async fn get_object(
         })
     })
     .to_string())
-}
-
-pub async fn get_object_proxy(
-    http_client: &HttpClient,
-    settings: &Settings,
-    input: ProxyObjectInput,
-) -> Result<S3Response, ApiError> {
-    let s3 = create_s3_client(settings)?;
-    let request = s3
-        .get_object()
-        .bucket(input.bucket)
-        .key(input.key)
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    execute_s3(http_client, request).await
 }
 
 pub async fn get_object_proxy_stream(
@@ -174,15 +159,15 @@ pub async fn delete_object(
     input: DeleteObjectInput,
 ) -> Result<String, ApiError> {
     let s3 = create_s3_client(settings)?;
-    let request = s3
-        .delete_object()
-        .bucket(input.bucket)
-        .key(input.key)
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::DeleteObjectFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        s3.delete_object()
+            .bucket(input.bucket)
+            .key(input.key)
+            .build_request(),
+        shiguredo_s3::api::DeleteObjectFluentBuilder::parse_response,
+    )
+    .await?;
 
     Ok(nojson::json(|f| {
         f.object(|f| {
@@ -207,12 +192,12 @@ pub async fn delete_objects(
         });
     }
 
-    let request = req
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::DeleteObjectsFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        req.build_request(),
+        shiguredo_s3::api::DeleteObjectsFluentBuilder::parse_response,
+    )
+    .await?;
 
     let deleted = output.deleted.unwrap_or_default();
     let errors = output.errors.unwrap_or_default();
@@ -276,12 +261,12 @@ pub async fn list_objects_v2(
         req = req.start_after(start_after);
     }
 
-    let request = req
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::ListObjectsV2FluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        req.build_request(),
+        shiguredo_s3::api::ListObjectsV2FluentBuilder::parse_response,
+    )
+    .await?;
 
     let contents = output.contents.unwrap_or_default();
     let common_prefixes = output.common_prefixes.unwrap_or_default();
@@ -335,25 +320,7 @@ pub fn presigned_get(settings: &Settings, input: PresignedObjectInput) -> Result
         .presigned(input.expires_in_secs)
         .map_err(map_s3_input_error_to_api_error)?;
 
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("url", &output.url)?;
-            f.member("method", &output.method)?;
-            f.member(
-                "headers",
-                nojson::array(|f| {
-                    for (name, value) in &output.headers {
-                        f.element(nojson::object(|f| {
-                            f.member("name", name)?;
-                            f.member("value", value)
-                        }))?;
-                    }
-                    Ok(())
-                }),
-            )
-        })
-    })
-    .to_string())
+    Ok(presigned_json(&output))
 }
 
 pub fn presigned_put(settings: &Settings, input: PresignedObjectInput) -> Result<String, ApiError> {
@@ -365,25 +332,7 @@ pub fn presigned_put(settings: &Settings, input: PresignedObjectInput) -> Result
         .presigned(input.expires_in_secs)
         .map_err(map_s3_input_error_to_api_error)?;
 
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("url", &output.url)?;
-            f.member("method", &output.method)?;
-            f.member(
-                "headers",
-                nojson::array(|f| {
-                    for (name, value) in &output.headers {
-                        f.element(nojson::object(|f| {
-                            f.member("name", name)?;
-                            f.member("value", value)
-                        }))?;
-                    }
-                    Ok(())
-                }),
-            )
-        })
-    })
-    .to_string())
+    Ok(presigned_json(&output))
 }
 
 pub async fn copy_object(
@@ -405,16 +354,16 @@ pub async fn copy_object(
     if let Some(version) = input.source_version_id {
         source.push_str(&format!("?versionId={}", encode_copy_component(&version)));
     }
-    let request = s3
-        .copy_object()
-        .bucket(input.bucket)
-        .key(input.key)
-        .copy_source(source)
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http, request).await?;
-    let output = shiguredo_s3::api::CopyObjectFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http,
+        s3.copy_object()
+            .bucket(input.bucket)
+            .key(input.key)
+            .copy_source(source)
+            .build_request(),
+        shiguredo_s3::api::CopyObjectFluentBuilder::parse_response,
+    )
+    .await?;
     Ok(nojson::json(|f| {
         f.object(|f| {
             f.member("e_tag", &output.e_tag)?;
@@ -436,12 +385,12 @@ pub async fn get_object_tagging(
     if let Some(version) = input.version_id {
         builder = builder.version_id(version);
     }
-    let request = builder
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http, request).await?;
-    let output = shiguredo_s3::api::GetObjectTaggingFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http,
+        builder.build_request(),
+        shiguredo_s3::api::GetObjectTaggingFluentBuilder::parse_response,
+    )
+    .await?;
     Ok(nojson::json(|f| {
         f.object(|f| {
             f.member("version_id", &output.version_id)?;
@@ -475,12 +424,12 @@ pub async fn put_object_tagging(
         builder = builder.version_id(version);
     }
     builder = builder.tagging(shiguredo_s3::types::Tagging { tag_set: tags });
-    let request = builder
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http, request).await?;
-    let output = shiguredo_s3::api::PutObjectTaggingFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http,
+        builder.build_request(),
+        shiguredo_s3::api::PutObjectTaggingFluentBuilder::parse_response,
+    )
+    .await?;
     Ok(nojson::json(|f| {
         f.object(|f| {
             f.member("version_id", &output.version_id)?;
@@ -503,12 +452,12 @@ pub async fn delete_object_tagging(
     if let Some(version) = input.version_id {
         builder = builder.version_id(version);
     }
-    let request = builder
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http, request).await?;
-    let output = shiguredo_s3::api::DeleteObjectTaggingFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http,
+        builder.build_request(),
+        shiguredo_s3::api::DeleteObjectTaggingFluentBuilder::parse_response,
+    )
+    .await?;
     Ok(nojson::json(|f| {
         f.object(|f| {
             f.member("version_id", &output.version_id)?;

@@ -16,12 +16,12 @@ pub async fn create_multipart_upload(
         req = req.content_type(content_type);
     }
 
-    let request = req
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::CreateMultipartUploadFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        req.build_request(),
+        shiguredo_s3::api::CreateMultipartUploadFluentBuilder::parse_response,
+    )
+    .await?;
 
     Ok(nojson::json(|f| {
         f.object(|f| {
@@ -39,18 +39,18 @@ pub async fn upload_part(
     input: UploadPartInput,
 ) -> Result<String, ApiError> {
     let s3 = create_s3_client(settings)?;
-    let request = s3
-        .upload_part()
-        .bucket(input.bucket)
-        .key(input.key)
-        .upload_id(input.upload_id)
-        .part_number(input.part_number)
-        .body(input.body)
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::UploadPartFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        s3.upload_part()
+            .bucket(input.bucket)
+            .key(input.key)
+            .upload_id(input.upload_id)
+            .part_number(input.part_number)
+            .body(input.body)
+            .build_request(),
+        shiguredo_s3::api::UploadPartFluentBuilder::parse_response,
+    )
+    .await?;
 
     Ok(nojson::json(|f| f.object(|f| f.member("e_tag", &output.e_tag))).to_string())
 }
@@ -74,17 +74,17 @@ pub async fn complete_multipart_upload(
         ),
     };
 
-    let request = s3
-        .complete_multipart_upload()
-        .bucket(input.bucket)
-        .key(input.key)
-        .upload_id(input.upload_id)
-        .multipart_upload(multipart_upload)
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::CompleteMultipartUploadFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        s3.complete_multipart_upload()
+            .bucket(input.bucket)
+            .key(input.key)
+            .upload_id(input.upload_id)
+            .multipart_upload(multipart_upload)
+            .build_request(),
+        shiguredo_s3::api::CompleteMultipartUploadFluentBuilder::parse_response,
+    )
+    .await?;
 
     Ok(nojson::json(|f| {
         f.object(|f| {
@@ -104,16 +104,16 @@ pub async fn abort_multipart_upload(
     input: AbortMultipartUploadInput,
 ) -> Result<String, ApiError> {
     let s3 = create_s3_client(settings)?;
-    let request = s3
-        .abort_multipart_upload()
-        .bucket(input.bucket)
-        .key(input.key)
-        .upload_id(input.upload_id)
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    shiguredo_s3::api::AbortMultipartUploadFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    send(
+        http_client,
+        s3.abort_multipart_upload()
+            .bucket(input.bucket)
+            .key(input.key)
+            .upload_id(input.upload_id)
+            .build_request(),
+        shiguredo_s3::api::AbortMultipartUploadFluentBuilder::parse_response,
+    )
+    .await?;
 
     Ok(nojson::json(|f| f.object(|f| f.member("aborted", true))).to_string())
 }
@@ -136,12 +136,12 @@ pub async fn list_parts(
         req = req.part_number_marker(part_number_marker);
     }
 
-    let request = req
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::ListPartsFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        req.build_request(),
+        shiguredo_s3::api::ListPartsFluentBuilder::parse_response,
+    )
+    .await?;
     let parts = output.parts.unwrap_or_default();
 
     Ok(nojson::json(|f| {
@@ -196,12 +196,12 @@ pub async fn list_multipart_uploads(
         req = req.upload_id_marker(upload_id_marker);
     }
 
-    let request = req
-        .build_request()
-        .map_err(map_s3_input_error_to_api_error)?;
-    let response = execute_s3(http_client, request).await?;
-    let output = shiguredo_s3::api::ListMultipartUploadsFluentBuilder::parse_response(&response)
-        .map_err(map_s3_runtime_error_to_api_error)?;
+    let output = send(
+        http_client,
+        req.build_request(),
+        shiguredo_s3::api::ListMultipartUploadsFluentBuilder::parse_response,
+    )
+    .await?;
     let uploads = output.uploads.unwrap_or_default();
     let common_prefixes = output.common_prefixes.unwrap_or_default();
 

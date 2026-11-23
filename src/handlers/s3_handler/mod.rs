@@ -8,8 +8,8 @@ use crate::{
         CreateBucketInput, CreateMultipartUploadInput, DeleteBucketInput,
         DeleteObjectIdentifierInput, DeleteObjectInput, DeleteObjectsInput, GetObjectInput,
         HeadBucketInput, HeadObjectInput, ListMultipartUploadsInput, ListObjectsV2Input,
-        ListPartsInput, PresignedObjectInput, ProxyObjectInput, ProxyObjectStreamInput,
-        PutObjectInput, UploadPartInput,
+        ListPartsInput, PresignedObjectInput, ProxyObjectStreamInput, PutObjectInput,
+        UploadPartInput,
     },
 };
 
