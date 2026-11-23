@@ -1,8 +1,8 @@
+use super::worker::{Outcome, State};
 use super::{Canonical, KnownFields};
 use crate::service::slack_service::{SlackClient, SlackReplyBody, retry_after_secs};
 use crate::{
     config::state::AppState,
-    database::DbResult,
     service::s3_service::{self, ProxyObjectStreamInput},
 };
 use nojson::{DisplayJson, JsonFormatter, RawJsonValue};
@@ -29,10 +29,11 @@ impl NotificationFile {
         })
     }
 
-    pub fn validate(&self) -> DbResult<()> {
+    /// 不正なら理由を返す。
+    pub fn validate(&self) -> Result<(), &'static str> {
         let leaf = self.key.strip_prefix("hitomi-notifications/").unwrap_or("");
         let Some((hash, extension)) = leaf.rsplit_once('.') else {
-            return Err("invalid notification file key".into());
+            return Err("invalid notification file key");
         };
         if self.bucket != "pdfs"
             || hash.len() != 64
@@ -45,7 +46,7 @@ impl NotificationFile {
             || self.name.len() > 128
             || self.name.contains(['\r', '\n', '/', '\\'])
         {
-            return Err("invalid notification file reference".into());
+            return Err("invalid notification file reference");
         }
         Ok(())
     }
@@ -68,14 +69,15 @@ pub enum FileError {
     Uncertain(&'static str),
 }
 impl FileError {
-    pub fn status(&self) -> (&'static str, i64, &'static str) {
+    pub(super) fn into_outcome(self) -> Outcome {
         match self {
-            Self::Retry(delay, message) => ("retry", *delay, *message),
-            Self::Failed(message) => ("failed", 0, *message),
-            Self::Uncertain(message) => ("uncertain", 0, *message),
+            Self::Retry(delay, message) => Outcome::with_error(State::Retry, delay, message),
+            Self::Failed(message) => Outcome::with_error(State::Failed, 0, message),
+            Self::Uncertain(message) => Outcome::with_error(State::Uncertain, 0, message),
         }
     }
 }
+
 pub async fn deliver(
     state: &AppState,
     pool: &PgPool,

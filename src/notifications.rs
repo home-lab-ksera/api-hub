@@ -1,15 +1,40 @@
-use crate::{
-    config::state::AppState,
-    database::DbResult,
-    service::slack_service::{SlackClient, SlackReplyBody, retry_after_secs},
-};
+use crate::config::state::AppState;
 use nojson::{DisplayJson, JsonFormatter, JsonValueKind, RawJson, RawJsonValue};
 use shiguredo_http11::Response;
 use sqlx::{PgPool, Row};
 use std::collections::BTreeMap;
-use std::time::Duration;
 mod file;
+mod worker;
 pub use file::NotificationFile;
+pub use worker::{deliver_one, worker};
+
+/// 通知を登録できなかった理由。
+#[derive(Debug)]
+pub enum EnqueueError {
+    /// 入力が不正。値は理由。
+    Invalid(&'static str),
+    /// 同じ producer・event_id・channel に、別の内容が登録済み。
+    Conflict,
+    Database(sqlx::Error),
+}
+
+impl std::fmt::Display for EnqueueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(reason) => f.write_str(reason),
+            Self::Conflict => f.write_str("idempotency key reused with different payload"),
+            Self::Database(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for EnqueueError {}
+
+impl From<sqlx::Error> for EnqueueError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Database(error)
+    }
+}
 
 pub struct Notification {
     pub producer: String,
@@ -143,17 +168,17 @@ fn payload_json(item: &Notification) -> String {
     .to_string()
 }
 
-pub async fn enqueue(pool: &PgPool, item: &Notification) -> DbResult<(i64, String)> {
+pub async fn enqueue(pool: &PgPool, item: &Notification) -> Result<(i64, String), EnqueueError> {
     for field in [&item.producer, &item.event_id, &item.channel] {
         if field.trim().is_empty() || field.len() > 256 {
-            return Err("invalid notification identity".into());
+            return Err(EnqueueError::Invalid("invalid notification identity"));
         }
     }
     if item.text.trim().is_empty() || item.text.len() > 16000 {
-        return Err("invalid notification text".into());
+        return Err(EnqueueError::Invalid("invalid notification text"));
     }
     if let Some(file) = &item.file {
-        file.validate()?;
+        file.validate().map_err(EnqueueError::Invalid)?;
     }
     let payload = payload_json(item);
     let mut tx = pool.begin().await?;
@@ -164,7 +189,7 @@ pub async fn enqueue(pool: &PgPool, item: &Notification) -> DbResult<(i64, Strin
     let row = sqlx::query("SELECT id,state,payload=$4::jsonb AS same_payload FROM notifications WHERE producer=$1 AND event_id=$2 AND channel=$3")
         .bind(&item.producer).bind(&item.event_id).bind(&item.channel).bind(&payload).fetch_one(&mut *tx).await?;
     if !row.get::<bool, _>("same_payload") {
-        return Err("idempotency key reused with different payload".into());
+        return Err(EnqueueError::Conflict);
     }
     let result = (row.get("id"), row.get("state"));
     tx.commit().await?;
@@ -180,16 +205,11 @@ pub async fn handle_post(state: &AppState, body: &[u8]) -> Response {
     };
     match enqueue(pool, &item).await {
         Ok((id, status)) => accepted(id, &status),
-        Err(cause) => {
-            let message = cause.to_string();
-            if message == "idempotency key reused with different payload" {
-                error(409, &message)
-            } else if message.starts_with("invalid notification") {
-                error(400, &message)
-            } else {
-                tracing::error!(error = %cause, "Notification persistence failed");
-                error(503, "notification persistence failed")
-            }
+        Err(EnqueueError::Conflict) => error(409, &EnqueueError::Conflict.to_string()),
+        Err(EnqueueError::Invalid(reason)) => error(400, reason),
+        Err(cause @ EnqueueError::Database(_)) => {
+            tracing::error!(error = %cause, "Notification persistence failed");
+            error(503, "notification persistence failed")
         }
     }
 }
@@ -238,217 +258,5 @@ pub async fn handle_retry(state: &AppState, id: &str) -> Response {
         Ok(result) if result.rows_affected() == 1 => accepted(id, "pending"),
         Ok(_) => error(409, "only uncertain or failed notifications can be retried"),
         Err(_) => error(503, "notification database unavailable"),
-    }
-}
-
-struct SlackReply {
-    status_code: u16,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
-async fn slack_reply(response: reqwest::Response) -> Result<SlackReply, reqwest::Error> {
-    let status_code = response.status().as_u16();
-    let headers = crate::http_client::headers(&response);
-    let body = response.bytes().await?.to_vec();
-    Ok(SlackReply {
-        status_code,
-        headers,
-        body,
-    })
-}
-
-pub async fn deliver_one(state: &AppState) -> DbResult<bool> {
-    let pool = state.database.as_ref().ok_or("database required")?;
-    // Slackが受け取った直後にworkerが落ちた可能性があるため、lease切れは結果不明にする。
-    sqlx::query("UPDATE notifications SET state='uncertain',last_error='worker lease expired; verify Slack before retry',updated_at=now() WHERE state='sending' AND lease_until < now()")
-        .execute(pool).await?;
-    let row = sqlx::query("WITH candidate AS (SELECT id FROM notifications WHERE state IN ('pending','retry') AND available_at<=now() ORDER BY available_at,id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE notifications n SET state='sending',attempts=attempts+1,claim_token=gen_random_uuid(),lease_until=now()+interval '90 seconds',updated_at=now() FROM candidate WHERE n.id=candidate.id RETURNING n.id,n.payload::text AS payload,n.claim_token::text,n.attempts")
-        .fetch_optional(pool).await?;
-    let Some(row) = row else {
-        return Ok(false);
-    };
-    let id: i64 = row.get("id");
-    let claim: String = row.get("claim_token");
-    let attempts: i32 = row.get("attempts");
-    let payload: String = row.get("payload");
-    let stored = RawJson::parse(&payload)?;
-    let has_file = stored
-        .value()
-        .to_member("file")
-        .ok()
-        .and_then(|member| member.optional())
-        .is_some();
-    let result = if has_file {
-        let mut share_started = false;
-        match tokio::time::timeout(
-            Duration::from_secs(60),
-            file::deliver(state, pool, id, &claim, stored.value(), &mut share_started),
-        )
-        .await
-        {
-            Ok(Ok(reply)) => Ok(Ok(reply)),
-            Ok(Err(error)) => {
-                let (status, delay, message) = error.status();
-                sqlx::query("UPDATE notifications SET state=$3,available_at=now()+make_interval(secs=>$4),last_error=$5,lease_until=NULL,updated_at=now() WHERE id=$1 AND claim_token=$2::uuid AND state='sending'")
-                    .bind(id).bind(&claim).bind(if status=="retry" && attempts>=8 {"failed"} else {status}).bind(delay as f64).bind(message).execute(pool).await?;
-                return Ok(true);
-            }
-            Err(_) if !share_started => {
-                sqlx::query("UPDATE notifications SET state=$3,available_at=now()+interval '60 seconds',last_error='file preparation timed out',lease_until=NULL,updated_at=now() WHERE id=$1 AND claim_token=$2::uuid AND state='sending'")
-                    .bind(id).bind(&claim).bind(if attempts>=8 {"failed"}else{"retry"}).execute(pool).await?;
-                return Ok(true);
-            }
-            Err(error) => Err(error),
-        }
-    } else {
-        tokio::time::timeout(
-            Duration::from_secs(60),
-            SlackClient::new(&state.client, &state.settings)
-                .post_json(
-                    "chat.postMessage",
-                    "application/json",
-                    nojson::json(|f| f.value(Canonical(stored.value())))
-                        .to_string()
-                        .into_bytes(),
-                )
-                .send(),
-        )
-        .await
-    };
-    let result = match result {
-        Ok(Ok(reply)) => Ok(slack_reply(reply).await),
-        Ok(Err(error)) => Ok(Err(error)),
-        Err(error) => Err(error),
-    };
-    let (status, delay, ts, error) = match result {
-        Ok(Ok(reply)) if reply.status_code == 429 => {
-            let delay = retry_after_secs(
-                reply
-                    .headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-                    .map(|(_, value)| value.as_str()),
-            );
-            ("retry", delay, None, Some("slack rate limited".to_string()))
-        }
-        Ok(Ok(reply)) if (200..300).contains(&reply.status_code) => {
-            match SlackReplyBody::parse(&reply.body) {
-                Some(SlackReplyBody {
-                    ok: Some(true), ts, ..
-                }) => ("sent", 0, ts, None),
-                Some(SlackReplyBody {
-                    ok: Some(false),
-                    error,
-                    ..
-                }) => {
-                    let error = error.as_deref().unwrap_or("Slack rejected request");
-                    let status = match error {
-                        "ratelimited" => "retry",
-                        "internal_error"
-                        | "fatal_error"
-                        | "request_timeout"
-                        | "service_unavailable" => "uncertain",
-                        _ => "failed",
-                    };
-                    (status, 60, None, Some(error.to_string()))
-                }
-                _ => (
-                    "uncertain",
-                    0,
-                    None,
-                    Some("invalid Slack response; verify before retry".into()),
-                ),
-            }
-        }
-        Ok(Ok(reply)) if reply.status_code >= 500 => (
-            "uncertain",
-            0,
-            None,
-            Some(format!(
-                "Slack HTTP {}; verify before retry",
-                reply.status_code
-            )),
-        ),
-        Ok(Ok(reply)) => (
-            "failed",
-            0,
-            None,
-            Some(format!("Slack HTTP {}", reply.status_code)),
-        ),
-        _ => (
-            "uncertain",
-            0,
-            None,
-            Some("transport failure; verify Slack before retry".into()),
-        ),
-    };
-    let status = if status == "retry" && attempts >= 8 {
-        "failed"
-    } else {
-        status
-    };
-    sqlx::query("UPDATE notifications SET state=$3,available_at=now()+make_interval(secs=>$4::double precision),slack_ts=$5,last_error=$6,lease_until=NULL,updated_at=now() WHERE id=$1 AND claim_token=$2::uuid AND state='sending'")
-        .bind(id).bind(claim).bind(status).bind(delay as f64).bind(ts).bind(error).execute(pool).await?;
-    Ok(true)
-}
-
-fn next_poll_delay(previous: Duration, worked: bool) -> Duration {
-    if worked {
-        Duration::from_secs(1)
-    } else {
-        previous
-            .saturating_mul(2)
-            .clamp(Duration::from_secs(1), Duration::from_secs(30))
-    }
-}
-
-pub async fn worker(state: AppState, shutdown: impl std::future::Future<Output = ()>) {
-    tokio::pin!(shutdown);
-    let mut pause = Duration::ZERO;
-    loop {
-        // 初回claim前にsignal handlerを登録する。終了要求は次のclaimより優先する。
-        tokio::select! {
-            biased;
-            _ = &mut shutdown => break,
-            _ = tokio::time::sleep(pause) => {},
-        }
-        // 配送中はSIGTERMでfutureを捨てず、Slack応答とDB確定を待つ。
-        // DB停止も含め75秒で打ち切り、90秒のPod終了猶予内に終了する。
-        let worked = match tokio::time::timeout(Duration::from_secs(75), deliver_one(&state)).await
-        {
-            Ok(Ok(worked)) => worked,
-            Ok(Err(error)) => {
-                tracing::error!(%error, "Notification worker failed");
-                false
-            }
-            Err(_) => {
-                tracing::error!("Notification delivery deadline exceeded; lease recovery required");
-                false
-            }
-        };
-        // 処理中は1秒を保ち、空キュー・DB障害時だけ最大30秒まで待機する。
-        pause = next_poll_delay(pause, worked);
-    }
-}
-
-#[cfg(test)]
-mod polling_tests {
-    use super::*;
-
-    #[test]
-    fn idle_polling_is_bounded_and_work_resets_the_delay() {
-        let mut pause = Duration::ZERO;
-        for seconds in [1, 2, 4, 8, 16, 30, 30] {
-            pause = next_poll_delay(pause, false);
-            assert_eq!(pause, Duration::from_secs(seconds));
-        }
-        pause = next_poll_delay(pause, true);
-        assert_eq!(pause, Duration::from_secs(1));
-        assert_eq!(next_poll_delay(pause, false), Duration::from_secs(2));
-        assert_eq!(next_poll_delay(pause, true), Duration::from_secs(1));
-        assert_eq!(
-            next_poll_delay(Duration::MAX, false),
-            Duration::from_secs(30)
-        );
     }
 }
