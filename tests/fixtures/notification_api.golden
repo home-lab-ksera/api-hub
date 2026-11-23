@@ -15,6 +15,11 @@ POST /notifications (wrong type) => 400 application/problem+json {"type":"about:
 POST /notifications (null text) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
 POST /notifications (duplicate key) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
 POST /notifications (array) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (array form) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (unknown key twice) => 202 application/json {"id":"9","state":"pending"}
+POST /notifications (deep unknown field) => 202 application/json {"id":"10","state":"pending"}
+POST /notifications (lone surrogate) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
+POST /notifications (bom) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
 POST /notifications (not json) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
 POST /notifications (trailing data) => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
 GET /notifications/1 => 200 application/json {"attempts":0,"channel":"C1","event_id":"e1","id":"1","last_error":null,"producer":"p","slack_file_id":null,"slack_ts":null,"state":"pending"}
@@ -29,7 +34,7 @@ POST /notifications/999/retry => 409 application/problem+json {"type":"about:bla
 POST /notifications/abc/retry => 400 application/problem+json {"type":"about:blank","title":"Bad Request","status":400,"detail":"Bad Request"}
 GET /metrics => 200 text/plain; version=0.0.4; charset=utf-8 # TYPE application_queue_jobs gauge
 application_queue_jobs{queue="notifications",state="failed"} 0
-application_queue_jobs{queue="notifications",state="pending"} 5
+application_queue_jobs{queue="notifications",state="pending"} 7
 application_queue_jobs{queue="notifications",state="retry"} 0
 application_queue_jobs{queue="notifications",state="sending"} 0
 application_queue_jobs{queue="notifications",state="sent"} 0
@@ -43,3 +48,5 @@ row 5 p e2 C1 pending {"text": "改行\n\"quote\" \\ \u0001 😀 </script>", "ch
 row 6 p e3 C1 pending {"text": "t", "channel": "C1"}
 row 7 p e4 C1 pending {"text": "t", "channel": "C1"}
 row 8 p e5 C1 pending {"file": {"key": "hitomi-notifications/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png", "name": "a.png", "bucket": "pdfs", "content_type": "image/png"}, "text": "t", "channel": "C1"}
+row 9 p e16 C1 pending {"text": "t", "channel": "C1"}
+row 10 p e17 C1 pending {"text": "t", "channel": "C1"}

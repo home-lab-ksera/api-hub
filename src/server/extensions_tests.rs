@@ -79,8 +79,12 @@ async fn browser_signing_is_scoped_and_uses_external_host() {
             "camera/2026/10/30/1793314800-session.mp4",
         ),
     ] {
-        let body =
-            serde_json::json!({"bucket":bucket,"key":key,"expires_in_secs":604800}).to_string();
+        let body = nojson::object(|f| {
+            f.member("bucket", bucket)?;
+            f.member("key", key)?;
+            f.member("expires_in_secs", 604800)
+        })
+        .to_string();
         let response = post(&state, "/s3/browser_get_object", &body).await;
         assert_eq!(response.status_code, 200);
         assert_eq!(response.get_header("cache-control"), Some("no-store"));
@@ -110,7 +114,11 @@ async fn browser_signing_is_scoped_and_uses_external_host() {
         ("pdfs", "hitomi/../private.pdf"),
         ("pdfs", "videos/a.txt"),
     ] {
-        let body = serde_json::json!({"bucket":bucket,"key":key}).to_string();
+        let body = nojson::object(|f| {
+            f.member("bucket", bucket)?;
+            f.member("key", key)
+        })
+        .to_string();
         assert_eq!(
             post(&state, "/s3/browser_get_object", &body)
                 .await
