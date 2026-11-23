@@ -509,23 +509,29 @@ async fn route_request(
 
 /// viewer がリンクから開けるよう、署名済み URL へ転送する。
 async fn browser_open(app_state: &AppState, query: Option<&str>) -> Result<Response, ApiError> {
-    let fields: std::collections::HashMap<_, _> =
+    // 同じ名前が複数あるときは後の値を使う。
+    let fields: std::collections::BTreeMap<String, String> =
         url::form_urlencoded::parse(query.unwrap_or("").as_bytes())
             .into_owned()
             .collect();
-    let body =
-        serde_json::to_vec(&fields).map_err(|_| ApiError::BadRequest("Invalid object".into()))?;
-    let response = s3_handler::browser_get_object(app_state, &body).await?;
+    let body = nojson::json(|f| f.value(&fields)).to_string();
+    let response = s3_handler::browser_get_object(app_state, body.as_bytes()).await?;
     if response.status_code != 200 {
         return Ok(response);
     }
-    let value: serde_json::Value = serde_json::from_slice(&response.body)
-        .map_err(|_| ApiError::InternalServerError("Invalid signed response".into()))?;
-    let location = value["url"]
-        .as_str()
+    let signed = std::str::from_utf8(&response.body)
+        .ok()
+        .and_then(|text| nojson::RawJson::parse(text).ok())
+        .ok_or_else(|| ApiError::InternalServerError("Invalid signed response".into()))?;
+    let location = signed
+        .value()
+        .to_member("url")
+        .ok()
+        .and_then(|member| member.optional())
+        .and_then(|url| String::try_from(url).ok())
         .ok_or_else(|| ApiError::InternalServerError("Missing signed URL".into()))?;
     Ok(Response::new(307, "Temporary Redirect")
-        .header("Location", location)
+        .header("Location", &location)
         .header("Cache-Control", "no-store")
         .header("Referrer-Policy", "no-referrer"))
 }

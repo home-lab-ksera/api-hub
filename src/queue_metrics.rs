@@ -11,12 +11,10 @@ pub async fn render(pool: &PgPool) -> Result<String, sqlx::Error> {
     )
     .await
     .map_err(|_| sqlx::Error::PoolTimedOut)??;
-    let counts: serde_json::Value = row.get("counts");
     let mut text = String::from("# TYPE application_queue_jobs gauge\n");
-    for (state, count) in counts
-        .as_object()
-        .expect("SQL returns a fixed state object")
-    {
+    // 状態名の昇順で出す。
+    for state in ["failed", "pending", "retry", "sending", "sent", "uncertain"] {
+        let count: i64 = row.get(state);
         writeln!(
             text,
             "application_queue_jobs{{queue=\"notifications\",state=\"{state}\"}} {count}"

@@ -171,7 +171,8 @@ async fn durable_notifications() {
         image_state.settings.s3_endpoint = Some(endpoint.clone());
         image_state.settings.slack_api_base_url = endpoint.clone();
         let server = tokio::spawn(async move {
-            let ticket=serde_json::json!({"ok":true,"upload_url":format!("{endpoint}/upload"),"file_id":"F1"}).to_string();
+            let ticket =
+                format!(r#"{{"ok":true,"upload_url":"{endpoint}/upload","file_id":"F1"}}"#);
             for (status, body) in [
                 (200, b"\xff\xd8\xffimage".to_vec()),
                 (200, ticket.into_bytes()),
@@ -193,9 +194,11 @@ async fn durable_notifications() {
                     decoder.feed(&bytes[..n]).unwrap();
                 };
                 if request.uri == "/files.completeUploadExternal" {
-                    let value: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-                    assert_eq!(value["initial_comment"], "image caption");
-                    assert_eq!(value["files"][0]["id"], "F1");
+                    // 以前の serde_json の出力とバイト単位で同じ。
+                    assert_eq!(
+                        String::from_utf8(request.body.clone()).unwrap(),
+                        r#"{"channel_id":"C1","files":[{"id":"F1","title":"image.jpg"}],"initial_comment":"image caption"}"#
+                    );
                 }
                 socket.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await.unwrap();
                 socket.write_all(&body).await.unwrap();
@@ -397,6 +400,8 @@ async fn integrated_api_delivers_and_drains_with_shared_three_connection_pool() 
             decoder.feed(&chunk[..n]).unwrap();
         };
         assert!(request.uri.ends_with("/chat.postMessage"));
+        // 以前の serde_json の出力とバイト単位で同じ。
+        assert_eq!(request.body, br#"{"channel":"C1","text":"fixture"}"#);
         received.send(()).unwrap();
         wait.await.unwrap();
         let body = r#"{"ok":true,"ts":"fixture"}"#;
@@ -442,7 +447,12 @@ async fn integrated_api_delivers_and_drains_with_shared_three_connection_pool() 
     .await
     .unwrap();
     let post = |event| {
-        client.post(format!("{base}/notifications")).json(&serde_json::json!({"producer":"fixture","event_id":event,"channel":"C1","text":"fixture"}))
+        client
+            .post(format!("{base}/notifications"))
+            .header("content-type", "application/json")
+            .body(format!(
+                r#"{{"producer":"fixture","event_id":"{event}","channel":"C1","text":"fixture"}}"#
+            ))
     };
     assert_eq!(post("first").send().await.unwrap().status(), 202);
     timeout(Duration::from_secs(5), arrival)
@@ -621,6 +631,12 @@ async fn notification_api_matches_golden() {
         ("null text", r#"{"producer":"p","event_id":"e12","channel":"C1","text":null}"#.into()),
         ("duplicate key", r#"{"producer":"p","producer":"q","event_id":"e13","channel":"C1","text":"t"}"#.into()),
         ("array", "[]".into()),
+        // serde の構造体は、フィールド順に並べた配列としても読めた。
+        ("array form", r#"["p","e15","C1","t",null]"#.into()),
+        ("unknown key twice", r#"{"producer":"p","event_id":"e16","channel":"C1","text":"t","x":1,"x":2}"#.into()),
+        ("deep unknown field", format!(r#"{{"producer":"p","event_id":"e17","channel":"C1","text":"t","x":{}{}}}"#, "[".repeat(200), "]".repeat(200))),
+        ("lone surrogate", r#"{"producer":"p","event_id":"e18","channel":"C1","text":"\ud800"}"#.into()),
+        ("bom", "\u{feff}{\"producer\":\"p\",\"event_id\":\"e19\",\"channel\":\"C1\",\"text\":\"t\"}".into()),
         ("not json", "nope".into()),
         ("trailing data", r#"{"producer":"p","event_id":"e14","channel":"C1","text":"t"} x"#.into()),
     ];
