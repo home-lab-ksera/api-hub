@@ -8,43 +8,25 @@ pub async fn list_buckets(app_state: &AppState) -> Result<Response, ApiError> {
 }
 
 pub async fn create_bucket(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_bucket_request(&body)?;
-    let result = s3_service::create_bucket(
-        &app_state.client,
-        &app_state.settings,
-        CreateBucketInput {
-            bucket: payload.bucket,
-        },
-    )
-    .await?;
-    Ok(json_response(result))
+    let bucket = parse_body(body, bucket_name)?;
+    let input = CreateBucketInput { bucket };
+    Ok(json_response(
+        s3_service::create_bucket(&app_state.client, &app_state.settings, input).await?,
+    ))
 }
 
 pub async fn head_bucket(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_bucket_request(&body)?;
-    let result = s3_service::head_bucket(
-        &app_state.client,
-        &app_state.settings,
-        HeadBucketInput {
-            bucket: payload.bucket,
-        },
-    )
-    .await?;
-    Ok(json_response(result))
+    let bucket = parse_body(body, bucket_name)?;
+    let input = HeadBucketInput { bucket };
+    Ok(json_response(
+        s3_service::head_bucket(&app_state.client, &app_state.settings, input).await?,
+    ))
 }
 
 pub async fn delete_bucket(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
-    let body = body_to_utf8(body)?;
-    let payload = parse_bucket_request(&body)?;
-    let result = s3_service::delete_bucket(
-        &app_state.client,
-        &app_state.settings,
-        DeleteBucketInput {
-            bucket: payload.bucket,
-        },
-    )
-    .await?;
-    Ok(json_response(result))
+    let bucket = parse_body(body, bucket_name)?;
+    let input = DeleteBucketInput { bucket };
+    Ok(json_response(
+        s3_service::delete_bucket(&app_state.client, &app_state.settings, input).await?,
+    ))
 }

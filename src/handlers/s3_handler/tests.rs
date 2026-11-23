@@ -1,6 +1,6 @@
 use super::{
-    extract_forward_header, parse_delete_objects_request, parse_list_objects_v2_request,
-    parse_presigned_object_request,
+    delete_objects_input, extract_forward_header, list_objects_v2_input, parse_body,
+    presigned_object_input,
 };
 use proptest::{prelude::ProptestConfig, prop_assert_eq, proptest};
 
@@ -15,7 +15,7 @@ fn parse_delete_objects_allows_null_optionals() {
         "quiet": null
     }"#;
 
-    let parsed = parse_delete_objects_request(body).expect("request should parse");
+    let parsed = parse_body(body.as_bytes(), delete_objects_input).expect("request should parse");
 
     assert_eq!(parsed.bucket, "pdfs");
     assert_eq!(parsed.objects.len(), 2);
@@ -23,7 +23,7 @@ fn parse_delete_objects_allows_null_optionals() {
     assert_eq!(parsed.objects[0].version_id, None);
     assert_eq!(parsed.objects[1].key, "20260418/b.pdf");
     assert_eq!(parsed.objects[1].version_id, None);
-    assert_eq!(parsed.quiet, None);
+    assert!(!parsed.quiet);
 }
 
 #[test]
@@ -36,7 +36,7 @@ fn parse_list_objects_v2_allows_null_optionals() {
         "start_after": null
     }"#;
 
-    let parsed = parse_list_objects_v2_request(body).expect("request should parse");
+    let parsed = parse_body(body.as_bytes(), list_objects_v2_input).expect("request should parse");
 
     assert_eq!(parsed.bucket, "pdfs");
     assert_eq!(parsed.prefix, None);
@@ -53,11 +53,11 @@ fn parse_presigned_object_allows_null_expires_in_secs() {
         "expires_in_secs": null
     }"#;
 
-    let parsed = parse_presigned_object_request(body).expect("request should parse");
+    let parsed = parse_body(body.as_bytes(), presigned_object_input).expect("request should parse");
 
     assert_eq!(parsed.bucket, "pdfs");
     assert_eq!(parsed.key, "20260418/a.pdf");
-    assert_eq!(parsed.expires_in_secs, None);
+    assert_eq!(parsed.expires_in_secs, 900);
 }
 
 proptest! {
