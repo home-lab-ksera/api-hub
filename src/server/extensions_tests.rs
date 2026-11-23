@@ -709,3 +709,89 @@ async fn http_interface_matches_golden() {
     let out = lines.concat();
     assert_golden("http_interface.golden", &out);
 }
+
+/// `put_object_and_notify` は Slack の失敗理由を `notification_error` としてそのまま返す。
+/// Slack の呼び出しを変えても、この文字列が変わらないことを固定する。
+#[tokio::test]
+async fn notification_error_strings_match_golden() {
+    use std::fmt::Write;
+    let request = r#"{"bucket":"b","key":"report.txt","file_data_base64":"aGk=","channel":"C1","text":"Report"}"#;
+    let mut out = String::new();
+    for (label, status, body) in [
+        ("ok", 200, r#"{"ok":true,"ts":"1.2"}"#),
+        (
+            "api error",
+            200,
+            r#"{"ok":false,"error":"channel_not_found"}"#,
+        ),
+        ("api error without code", 200, r#"{"ok":false}"#),
+        (
+            "api error with non-string code",
+            200,
+            r#"{"ok":false,"error":3}"#,
+        ),
+        ("missing ok", 200, r#"{"ts":"1.2"}"#),
+        ("ok is not a bool", 200, r#"{"ok":"true"}"#),
+        ("not json", 200, "<html>"),
+        ("empty body", 200, ""),
+        ("array", 200, "[]"),
+        ("rate limited", 429, r#"{"ok":false,"error":"ratelimited"}"#),
+        ("server error", 500, "oops"),
+        ("client error", 404, r#"{"ok":false,"error":"x"}"#),
+    ] {
+        let (state, task) = upstream(vec![(200, ""), (status, body)]).await;
+        let response = post(&state, "/s3/put_object_and_notify", request).await;
+        task.await.unwrap();
+        let json = nojson::RawJson::parse(std::str::from_utf8(&response.body).unwrap()).unwrap();
+        let notified = json
+            .value()
+            .to_member("notified")
+            .unwrap()
+            .required()
+            .unwrap();
+        let error = json
+            .value()
+            .to_member("notification_error")
+            .unwrap()
+            .required()
+            .unwrap();
+        writeln!(
+            out,
+            "{label} ({status} {body}) => {} notified={} notification_error={}",
+            response.status_code,
+            notified.as_raw_str(),
+            error.as_raw_str()
+        )
+        .unwrap();
+    }
+    // Slack へ接続できない場合。エラー文には URL が入るため、ポートを伏せる。
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", closed.local_addr().unwrap());
+    let refuser = tokio::spawn(async move {
+        loop {
+            if let Ok((socket, _)) = closed.accept().await {
+                drop(socket);
+            }
+        }
+    });
+    let (mut state, task) = upstream(vec![(200, "")]).await;
+    state.settings.slack_api_base_url = endpoint.clone();
+    let response = post(&state, "/s3/put_object_and_notify", request).await;
+    task.await.unwrap();
+    refuser.abort();
+    let json = nojson::RawJson::parse(std::str::from_utf8(&response.body).unwrap()).unwrap();
+    let error = json
+        .value()
+        .to_member("notification_error")
+        .unwrap()
+        .required()
+        .unwrap();
+    writeln!(
+        out,
+        "connection closed => {} notification_error={}",
+        response.status_code,
+        error.as_raw_str().replace(&endpoint, "<slack>")
+    )
+    .unwrap();
+    assert_golden("notification_errors.golden", &out);
+}
