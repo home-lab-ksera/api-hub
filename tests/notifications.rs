@@ -544,3 +544,176 @@ async fn migration_cli_does_not_load_http_settings_or_deliver() {
         .await
         .unwrap();
 }
+
+/// 期待値ファイルと比べる。`UPDATE_GOLDEN=1` のときは期待値を書き換える。
+fn assert_golden(name: &str, actual: &str) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(&path, actual).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("{} is missing; run with UPDATE_GOLDEN=1", path.display()));
+    if expected != actual {
+        let first = expected
+            .lines()
+            .zip(actual.lines())
+            .position(|(e, a)| e != a)
+            .unwrap_or_else(|| expected.lines().count().min(actual.lines().count()));
+        panic!(
+            "{name} differs at line {}:\n  expected: {}\n  actual:   {}\nrun with UPDATE_GOLDEN=1 if the change is intended",
+            first + 1,
+            expected.lines().nth(first).unwrap_or("<end>"),
+            actual.lines().nth(first).unwrap_or("<end>"),
+        );
+    }
+}
+
+/// 通知 API の HTTP 応答と、DB に保存される payload を固定する。
+#[tokio::test]
+#[ignore = "requires isolated TEST_DATABASE_URL"]
+async fn notification_api_matches_golden() {
+    use std::fmt::Write;
+    let (pool, admin, schema) = isolated_pool().await;
+    database::migrate(&pool).await.unwrap();
+    let state = AppState {
+        database: Some(pool.clone()),
+        client: api_hub::http_client::new(),
+        settings: Settings {
+            slack_bot_token: "test".into(),
+            slack_api_base_url: "http://127.0.0.1:9".into(),
+            s3_access_key_id: "test".into(),
+            s3_secret_access_key: "test".into(),
+            s3_region: "us-east-1".into(),
+            s3_endpoint: None,
+            s3_browser_endpoint: None,
+            s3_use_path_style: true,
+            s3_session_token: None,
+        },
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(api_hub::server::serve(listener, state, async {
+        let _ = stopped.await;
+    }));
+    let client = api_hub::http_client::new();
+    let mut out = String::new();
+    let hash = "0123456789abcdef".repeat(4);
+    let long_text = "a".repeat(16001);
+    let posts: Vec<(&str, String)> = vec![
+        ("new", r#"{"producer":"p","event_id":"e1","channel":"C1","text":"hello"}"#.into()),
+        ("same event", r#"{"producer":"p","event_id":"e1","channel":"C1","text":"hello"}"#.into()),
+        ("same event, other order", r#"{"text":"hello","channel":"C1","event_id":"e1","producer":"p"}"#.into()),
+        ("changed payload", r#"{"producer":"p","event_id":"e1","channel":"C1","text":"changed"}"#.into()),
+        ("escapes and unicode", r#"{"producer":"p","event_id":"e2","channel":"C1","text":"改行\n\"quote\" \\ \u0001 😀 </script>"}"#.into()),
+        ("unknown field", r#"{"producer":"p","event_id":"e3","channel":"C1","text":"t","extra":1}"#.into()),
+        ("null file", r#"{"producer":"p","event_id":"e4","channel":"C1","text":"t","file":null}"#.into()),
+        ("file", format!(r#"{{"producer":"p","event_id":"e5","channel":"C1","text":"t","file":{{"name":"a.png","content_type":"image/png","key":"hitomi-notifications/{hash}.png","bucket":"pdfs"}}}}"#)),
+        ("invalid file", format!(r#"{{"producer":"p","event_id":"e6","channel":"C1","text":"t","file":{{"name":"a.png","content_type":"image/jpeg","key":"hitomi-notifications/{hash}.png","bucket":"pdfs"}}}}"#)),
+        ("file missing field", r#"{"producer":"p","event_id":"e7","channel":"C1","text":"t","file":{"bucket":"pdfs"}}"#.into()),
+        ("missing text", r#"{"producer":"p","event_id":"e8","channel":"C1"}"#.into()),
+        ("blank producer", r#"{"producer":" ","event_id":"e9","channel":"C1","text":"t"}"#.into()),
+        ("text too long", format!(r#"{{"producer":"p","event_id":"e10","channel":"C1","text":"{long_text}"}}"#)),
+        ("wrong type", r#"{"producer":1,"event_id":"e11","channel":"C1","text":"t"}"#.into()),
+        ("null text", r#"{"producer":"p","event_id":"e12","channel":"C1","text":null}"#.into()),
+        ("duplicate key", r#"{"producer":"p","producer":"q","event_id":"e13","channel":"C1","text":"t"}"#.into()),
+        ("array", "[]".into()),
+        ("not json", "nope".into()),
+        ("trailing data", r#"{"producer":"p","event_id":"e14","channel":"C1","text":"t"} x"#.into()),
+    ];
+    for (label, body) in posts {
+        let response = client
+            .post(format!("{base}/notifications"))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let content_type = response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = response.text().await.unwrap();
+        writeln!(
+            out,
+            "POST /notifications ({label}) => {status} {content_type} {body}"
+        )
+        .unwrap();
+    }
+    sqlx::query(
+        "UPDATE notifications SET state='failed',attempts=8,last_error='x' WHERE event_id='e2'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (method, path) in [
+        // 重複した POST でも連番を消費するため、e2 の ID は 5。
+        ("GET", "/notifications/1"),
+        ("GET", "/notifications/5"),
+        ("GET", "/notifications/2"),
+        ("GET", "/notifications/999"),
+        ("GET", "/notifications/abc"),
+        ("POST", "/notifications/1/retry"),
+        ("POST", "/notifications/5/retry"),
+        ("GET", "/notifications/5"),
+        ("POST", "/notifications/999/retry"),
+        ("POST", "/notifications/abc/retry"),
+        ("GET", "/metrics"),
+    ] {
+        let response = client
+            .request(method.parse().unwrap(), format!("{base}{path}"))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        let body = response.text().await.unwrap();
+        // 経過時間は実行ごとに変わる。
+        let body = body
+            .lines()
+            .map(|line| match line.rsplit_once(' ') {
+                Some((name, _))
+                    if name.starts_with("application_queue_oldest_pending_age_seconds") =>
+                {
+                    format!("{name} <age>")
+                }
+                _ => line.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        writeln!(out, "{method} {path} => {status} {content_type} {body}").unwrap();
+    }
+    for row in sqlx::query("SELECT id,producer,event_id,channel,state,payload::text AS payload FROM notifications ORDER BY id")
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    {
+        writeln!(
+            out,
+            "row {} {} {} {} {} {}",
+            row.get::<i64, _>("id"),
+            row.get::<String, _>("producer"),
+            row.get::<String, _>("event_id"),
+            row.get::<String, _>("channel"),
+            row.get::<String, _>("state"),
+            row.get::<String, _>("payload"),
+        )
+        .unwrap();
+    }
+    stop.send(()).unwrap();
+    server.await.unwrap().unwrap();
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    assert_golden("notification_api.golden", &out);
+}
