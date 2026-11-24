@@ -360,4 +360,58 @@ mod tests {
         assert_eq!(lookup("POST", "/missing").body(), Body::Json(SMALL_BODY));
         assert_eq!(lookup("GET", "/s3/preview/b/k").body(), Body::Stream);
     }
+
+    /// OpenAPI の `paths` と経路の表が一致する。エンドポイントの追加でドキュメントを忘れない。
+    #[test]
+    fn openapi_documents_exactly_the_routes() {
+        let spec = nojson::RawJson::parse(include_str!("../../openapi.json")).unwrap();
+        let paths = spec.value().to_member("paths").unwrap().required().unwrap();
+        // `{name}` と `{*name}` を具体的な値に置き換えた、メソッドとパスの組。
+        let mut documented = Vec::new();
+        for (path, operations) in paths.to_object().unwrap() {
+            let path = path.to_unquoted_string_str().unwrap();
+            let sample = path
+                .split('/')
+                .map(|segment| {
+                    if segment.starts_with('{') {
+                        "x"
+                    } else {
+                        segment
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            for (method, _) in operations.to_object().unwrap() {
+                let method = method
+                    .to_unquoted_string_str()
+                    .unwrap()
+                    .to_ascii_uppercase();
+                documented.push((method, sample.clone()));
+            }
+        }
+        for (method, sample) in &documented {
+            match lookup(method, sample) {
+                Lookup::Found(..) => {}
+                Lookup::Preflight if method == "OPTIONS" => {}
+                other => panic!("{method} {sample} is documented but resolves to {other:?}"),
+            }
+        }
+        for route in ROUTES {
+            let is_route = |(method, sample): &&(String, String)| {
+                method == route.method
+                    && matches!(lookup(method, sample), Lookup::Found(found, _) if std::ptr::eq(found, route))
+            };
+            assert!(
+                documented.iter().any(|entry| is_route(&entry)),
+                "{route:?} is not documented"
+            );
+            if route.browser {
+                assert!(
+                    documented.iter().any(|(method, sample)| method == "OPTIONS"
+                        && route.path.capture(sample).is_some()),
+                    "the preflight for {route:?} is not documented"
+                );
+            }
+        }
+    }
 }
