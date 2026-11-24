@@ -5,8 +5,6 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-use crate::request_id;
-
 /// ログ設定
 #[derive(Debug, Clone)]
 pub struct LogConfig {
@@ -49,40 +47,4 @@ pub fn init_tracing(config: LogConfig) {
         .with(env_filter)
         .with(jsonl_layer)
         .init();
-}
-
-/// リクエストIDの生成
-#[allow(dead_code)]
-pub fn generate_request_id() -> String {
-    request_id::generate_request_id()
-}
-
-/// 構造化ログ用のマクロ
-#[macro_export]
-macro_rules! log_event {
-    ($level:expr, $($key:ident = $value:expr),* $(,)?) => {
-        match $level {
-            tracing::Level::ERROR => tracing::error!($($key = $value),*),
-            tracing::Level::WARN => tracing::warn!($($key = $value),*),
-            tracing::Level::INFO => tracing::info!($($key = $value),*),
-            tracing::Level::DEBUG => tracing::debug!($($key = $value),*),
-            tracing::Level::TRACE => tracing::trace!($($key = $value),*),
-        }
-    };
-}
-
-/// パフォーマンス計測用マクロ
-#[macro_export]
-macro_rules! measure_time {
-    ($name:expr, $body:expr) => {{
-        let start = std::time::Instant::now();
-        let result = $body;
-        let duration = start.elapsed();
-        tracing::debug!(
-            operation = $name,
-            duration_ms = duration.as_millis() as u64,
-            "Operation completed"
-        );
-        result
-    }};
 }

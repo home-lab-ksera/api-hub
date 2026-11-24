@@ -155,7 +155,7 @@ async fn handle_http(
         let (mut head, stream) = dispatch(&state, &parts.method, &parts.uri, body, &mut metadata)
             .await
             .unwrap_or_else(|error| (error.into_response(), None));
-        finish_response(&mut head, stream.is_some(), &context, &metadata);
+        finish_response(&mut head, stream.is_some(), &context);
         context.log_completed(head.status_code, start.elapsed());
 
         let mut response =
@@ -254,17 +254,12 @@ async fn dispatch(
 }
 
 /// すべての応答に1回だけ適用する後処理。
-fn finish_response(
-    response: &mut Response,
-    streamed: bool,
-    context: &RequestContext,
-    request: &Request,
-) {
+fn finish_response(response: &mut Response, streamed: bool, context: &RequestContext) {
     // 本文を流す応答は上流の本文をそのまま返すため、problem details へ置き換えない。
     if !streamed {
         apply_problem_details(response);
     }
-    apply_s3_cors(&context.path, request, response);
+    apply_s3_cors(&context.path, response);
     response.add_header("x-request-id", &context.request_id);
 }
 
@@ -435,7 +430,7 @@ async fn process_request(request: Request, app_state: &AppState) -> Response {
     let mut response = route_request(&request, app_state, path, query)
         .await
         .unwrap_or_else(ApiError::into_response);
-    finish_response(&mut response, false, &context, &request);
+    finish_response(&mut response, false, &context);
     response
 }
 
@@ -561,17 +556,12 @@ fn apply_problem_details(response: &mut Response) {
     *response = problem_details_response(response.status_code, reason_phrase(response.status_code));
 }
 
-fn apply_s3_cors(path: &str, request: &Request, response: &mut Response) {
+fn apply_s3_cors(path: &str, response: &mut Response) {
     if !path.starts_with("/s3/") {
         return;
     }
-
-    let allow_origin = request
-        .get_header("origin")
-        .filter(|origin| *origin == S3_CORS_ALLOWED_ORIGIN)
-        .unwrap_or(S3_CORS_ALLOWED_ORIGIN);
-
-    response.add_header("Access-Control-Allow-Origin", allow_origin);
+    // 許可するオリジンは viewer の1つだけなので、要求の Origin によらず同じ値を返す。
+    response.add_header("Access-Control-Allow-Origin", S3_CORS_ALLOWED_ORIGIN);
     response.add_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     response.add_header("Access-Control-Allow-Headers", "content-type, x-request-id");
     response.add_header("Access-Control-Max-Age", "600");
