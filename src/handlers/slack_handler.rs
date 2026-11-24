@@ -3,7 +3,7 @@ use shiguredo_http11::uri::percent_decode;
 use std::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::{config::state::AppState, errors::api_error::ApiError, service::slack_service};
+use crate::{config::state::AppState, errors::api_error::ApiError, media, service::slack_service};
 
 struct UploadQuery {
     pub channel: String,
@@ -103,15 +103,8 @@ fn decode_query_component(value: &str) -> Result<String, ApiError> {
     percent_decode(&replaced).map_err(|_| ApiError::BadRequest("Invalid query string".to_string()))
 }
 
-fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    headers
-        .iter()
-        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
-}
-
 fn content_type(headers: &[(String, String)]) -> Result<String, ApiError> {
-    let content_type = header_value(headers, "content-type")
+    let content_type = crate::http_client::find_header(headers, "content-type")
         .ok_or_else(|| ApiError::BadRequest("Missing Content-Type header".to_string()))?
         .trim();
 
@@ -125,69 +118,59 @@ fn content_type(headers: &[(String, String)]) -> Result<String, ApiError> {
     Ok(normalized)
 }
 
-fn looks_like_pdf(data: &[u8]) -> bool {
-    data.starts_with(b"%PDF-")
+/// 受け付ける画像の形式。Content-Type・拡張子・エラーに出す形式名・先頭バイトの確認。
+struct ImageType {
+    media_type: &'static str,
+    extension: &'static str,
+    label: &'static str,
+    matches: fn(&[u8]) -> bool,
 }
 
-fn looks_like_png(data: &[u8]) -> bool {
-    data.starts_with(&[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1A, b'\n'])
-}
+const IMAGE_TYPES: [ImageType; 4] = [
+    ImageType {
+        media_type: "image/png",
+        extension: "png",
+        label: "PNG",
+        matches: media::is_png,
+    },
+    ImageType {
+        media_type: "image/jpeg",
+        extension: "jpg",
+        label: "JPEG",
+        matches: media::is_jpeg,
+    },
+    ImageType {
+        media_type: "image/gif",
+        extension: "gif",
+        label: "GIF",
+        matches: media::is_gif,
+    },
+    ImageType {
+        media_type: "image/webp",
+        extension: "webp",
+        label: "WEBP",
+        matches: media::is_webp,
+    },
+];
 
-fn looks_like_jpeg(data: &[u8]) -> bool {
-    data.starts_with(&[0xFF, 0xD8, 0xFF])
-}
-
-fn looks_like_gif(data: &[u8]) -> bool {
-    data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")
-}
-
-fn looks_like_webp(data: &[u8]) -> bool {
-    data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP"
-}
-
+/// Content-Type と先頭バイトが一致する画像なら拡張子を返す。
 fn ensure_image_content(content_type: &str, data: &[u8]) -> Result<&'static str, ApiError> {
-    let extension = match content_type {
-        "image/png" => {
-            if !looks_like_png(data) {
-                return Err(ApiError::BadRequest(
-                    "Body is not a valid PNG image".to_string(),
-                ));
-            }
-            "png"
-        }
-        "image/jpeg" => {
-            if !looks_like_jpeg(data) {
-                return Err(ApiError::BadRequest(
-                    "Body is not a valid JPEG image".to_string(),
-                ));
-            }
-            "jpg"
-        }
-        "image/gif" => {
-            if !looks_like_gif(data) {
-                return Err(ApiError::BadRequest(
-                    "Body is not a valid GIF image".to_string(),
-                ));
-            }
-            "gif"
-        }
-        "image/webp" => {
-            if !looks_like_webp(data) {
-                return Err(ApiError::BadRequest(
-                    "Body is not a valid WEBP image".to_string(),
-                ));
-            }
-            "webp"
-        }
-        _ => {
-            return Err(ApiError::BadRequest(
-                "Unsupported image Content-Type. Use image/png, image/jpeg, image/gif, or image/webp"
-                    .to_string(),
-            ));
-        }
+    let Some(image) = IMAGE_TYPES
+        .iter()
+        .find(|image| image.media_type == content_type)
+    else {
+        return Err(ApiError::BadRequest(
+            "Unsupported image Content-Type. Use image/png, image/jpeg, image/gif, or image/webp"
+                .to_string(),
+        ));
     };
-
-    Ok(extension)
+    if !(image.matches)(data) {
+        return Err(ApiError::BadRequest(format!(
+            "Body is not a valid {} image",
+            image.label
+        )));
+    }
+    Ok(image.extension)
 }
 
 fn build_default_name(prefix: &str, extension: &str) -> String {
@@ -230,6 +213,41 @@ async fn message(app_state: &AppState, body: &[u8], update: bool) -> Result<Resp
     Ok(json_string_response(response))
 }
 
+/// 検証済みのファイルを Slack へ送り、Slack の応答本文を返す。`kind` はログに出す種類名。
+async fn share_file(
+    app_state: &AppState,
+    channel: &str,
+    file_name: &str,
+    body: &[u8],
+    kind: &str,
+) -> Result<Response, ApiError> {
+    let start = Instant::now();
+    let response_text = slack_service::send_single_file_to_slack(
+        &slack_service::SlackClient::new(&app_state.client, &app_state.settings),
+        body,
+        file_name,
+        channel,
+    )
+    .await
+    .map_err(|e| {
+        error!(
+            error = %e,
+            file_name = %file_name,
+            channel = %channel,
+            "Failed to upload {kind} to Slack"
+        );
+        ApiError::InternalServerError(e.to_string())
+    })?;
+    info!(
+        file_name = %file_name,
+        channel = %channel,
+        file_size = body.len(),
+        duration_ms = start.elapsed().as_millis() as u64,
+        "Successfully uploaded {kind} to Slack"
+    );
+    Ok(json_string_response(response_text))
+}
+
 #[instrument(skip(app_state, headers, body))]
 pub async fn upload_image_raw(
     app_state: &AppState,
@@ -244,7 +262,6 @@ pub async fn upload_image_raw(
     let file_name = payload
         .file_name
         .unwrap_or_else(|| build_default_name("image-upload", extension));
-
     debug!(
         file_name = %file_name,
         channel = %payload.channel,
@@ -252,36 +269,7 @@ pub async fn upload_image_raw(
         file_size = body.len(),
         "Processing raw image upload request"
     );
-
-    let start = Instant::now();
-
-    let response_text = slack_service::send_single_file_to_slack(
-        &slack_service::SlackClient::new(&app_state.client, &app_state.settings),
-        body,
-        &file_name,
-        &payload.channel,
-    )
-    .await
-    .map_err(|e| {
-        error!(
-            error = %e,
-            file_name = %file_name,
-            channel = %payload.channel,
-            "Failed to upload image to Slack"
-        );
-        ApiError::InternalServerError(e.to_string())
-    })?;
-
-    let duration = start.elapsed();
-    info!(
-        file_name = %file_name,
-        channel = %payload.channel,
-        file_size = body.len(),
-        duration_ms = duration.as_millis() as u64,
-        "Successfully uploaded image to Slack"
-    );
-
-    Ok(json_string_response(response_text))
+    share_file(app_state, &payload.channel, &file_name, body, "image").await
 }
 
 #[instrument(skip(app_state, headers, body))]
@@ -294,58 +282,55 @@ pub async fn upload_pdf_raw(
     let payload = parse_upload_query(raw_query)?;
     let content_type = content_type(headers)?;
     validate_file_not_empty(body)?;
-
     if content_type != "application/pdf" {
         return Err(ApiError::BadRequest(
             "Unsupported Content-Type. Use application/pdf".to_string(),
         ));
     }
-
-    if !looks_like_pdf(body) {
+    if !media::is_pdf(body) {
         warn!(channel = %payload.channel, "PDF signature check failed");
         return Err(ApiError::BadRequest(
             "Body is not a valid PDF document".to_string(),
         ));
     }
-
     let file_name = payload
         .file_name
         .unwrap_or_else(|| build_default_name("document", "pdf"));
-
     debug!(
         file_name = %file_name,
         channel = %payload.channel,
         file_size = body.len(),
         "Processing raw PDF upload request"
     );
+    share_file(app_state, &payload.channel, &file_name, body, "PDF").await
+}
 
-    let start = Instant::now();
+#[cfg(test)]
+mod tests {
+    use super::ensure_image_content;
 
-    let response_text = slack_service::send_single_file_to_slack(
-        &slack_service::SlackClient::new(&app_state.client, &app_state.settings),
-        body,
-        &file_name,
-        &payload.channel,
-    )
-    .await
-    .map_err(|e| {
-        error!(
-            error = %e,
-            file_name = %file_name,
-            channel = %payload.channel,
-            "Failed to upload PDF to Slack"
+    #[test]
+    fn image_content_errors_name_the_format() {
+        let png = b"\x89PNG\r\n\x1a\nimage";
+        assert_eq!(ensure_image_content("image/png", png).unwrap(), "png");
+        for (media_type, label) in [
+            ("image/png", "PNG"),
+            ("image/jpeg", "JPEG"),
+            ("image/gif", "GIF"),
+            ("image/webp", "WEBP"),
+        ] {
+            assert_eq!(
+                ensure_image_content(media_type, b"x")
+                    .unwrap_err()
+                    .to_string(),
+                format!("Bad Request: Body is not a valid {label} image")
+            );
+        }
+        assert_eq!(
+            ensure_image_content("image/svg+xml", png)
+                .unwrap_err()
+                .to_string(),
+            "Bad Request: Unsupported image Content-Type. Use image/png, image/jpeg, image/gif, or image/webp"
         );
-        ApiError::InternalServerError(e.to_string())
-    })?;
-
-    let duration = start.elapsed();
-    info!(
-        file_name = %file_name,
-        channel = %payload.channel,
-        file_size = body.len(),
-        duration_ms = duration.as_millis() as u64,
-        "Successfully uploaded PDF to Slack"
-    );
-
-    Ok(json_string_response(response_text))
+    }
 }

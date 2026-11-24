@@ -34,17 +34,7 @@ async fn upstream(replies: Vec<(u16, &'static str)>) -> (AppState, JoinHandle<Ve
     let state = AppState {
         database: None,
         client: crate::http_client::new(),
-        settings: Settings {
-            slack_bot_token: "test-token".into(),
-            slack_api_base_url: endpoint.clone(),
-            s3_access_key_id: "test".into(),
-            s3_secret_access_key: "test".into(),
-            s3_region: "us-east-1".into(),
-            s3_endpoint: Some(endpoint),
-            s3_browser_endpoint: None,
-            s3_use_path_style: true,
-            s3_session_token: None,
-        },
+        settings: Settings::for_test(&endpoint),
     };
     (state, task)
 }

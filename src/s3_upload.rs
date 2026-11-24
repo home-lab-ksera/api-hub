@@ -177,17 +177,7 @@ mod tests {
         let state = AppState {
             database: None,
             client: crate::http_client::new(),
-            settings: Settings {
-                slack_bot_token: String::new(),
-                slack_api_base_url: String::new(),
-                s3_access_key_id: "test".into(),
-                s3_secret_access_key: "test".into(),
-                s3_region: "us-east-1".into(),
-                s3_endpoint: Some(endpoint),
-                s3_browser_endpoint: None,
-                s3_use_path_style: true,
-                s3_session_token: None,
-            },
+            settings: Settings::for_test(&endpoint),
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap())

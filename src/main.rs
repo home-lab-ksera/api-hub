@@ -1,9 +1,9 @@
 use api_hub::{config, logging, server};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, process::ExitCode};
 use tracing::{error, info, info_span};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() {
+async fn main() -> ExitCode {
     // ログシステムの初期化
     let log_config = logging::LogConfig::default();
     logging::init_tracing(log_config);
@@ -21,6 +21,18 @@ async fn main() {
         "Starting application"
     );
 
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(code) => code,
+    }
+}
+
+/// 失敗は呼び出し元でログに残してから、終了コードとして返す。
+fn failed(_: ()) -> ExitCode {
+    ExitCode::FAILURE
+}
+
+async fn run() -> Result<(), ExitCode> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() > 1
         || args
@@ -28,83 +40,53 @@ async fn main() {
             .is_some_and(|arg| !["--serve", "--migrate"].contains(&arg.as_str()))
     {
         eprintln!("Usage: api-hub [--serve|--migrate]");
-        std::process::exit(2);
+        return Err(ExitCode::from(2));
     }
     let mode = args.first().map(String::as_str).unwrap_or("--serve");
     if std::env::var_os("PGDATABASE").is_none() && std::env::var_os("DATABASE_URL").is_none() {
         error!("PGDATABASE or DATABASE_URL is required");
-        std::process::exit(1);
+        return Err(ExitCode::FAILURE);
     }
-    let database = match api_hub::database::connect().await {
-        Ok(pool) => pool,
-        Err(error) => {
-            error!(%error,"Database connection failed");
-            std::process::exit(1);
-        }
-    };
+    let database = api_hub::database::connect()
+        .await
+        .map_err(|error| error!(%error, "Database connection failed"))
+        .map_err(failed)?;
     if mode == "--migrate" {
-        if let Err(error) = api_hub::database::migrate(&database).await {
-            error!(%error, "Database migration failed");
-            std::process::exit(1);
-        }
+        api_hub::database::migrate(&database)
+            .await
+            .map_err(|error| error!(%error, "Database migration failed"))
+            .map_err(failed)?;
         database.close().await;
-        return;
+        return Ok(());
     }
 
-    let settings = match config::settings::Settings::new() {
-        Ok(s) => {
-            info!(config_loaded = true, "Configuration loaded successfully");
-            s
-        }
-        Err(e) => {
-            error!(
-                error = %e,
-                config_loaded = false,
-                "Failed to load settings"
-            );
-            std::process::exit(1);
-        }
-    };
-
-    let client = api_hub::http_client::new();
+    let settings = config::settings::Settings::new()
+        .map_err(|e| error!(error = %e, config_loaded = false, "Failed to load settings"))
+        .map_err(failed)?;
+    info!(config_loaded = true, "Configuration loaded successfully");
 
     let app_state = config::state::AppState {
         settings,
-        client,
+        client: api_hub::http_client::new(),
         database: Some(database),
     };
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
+    info!(addr = %addr, port = addr.port(), "Starting HTTP server");
 
-    info!(
-        addr = %addr,
-        port = addr.port(),
-        "Starting HTTP server"
-    );
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| {
+            error!(error = %e, address = %addr, port = addr.port(), "Failed to bind to address")
+        })
+        .map_err(failed)?;
+    info!(addr = %addr, "Server successfully bound to address");
 
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!(
-                error = %e,
-                address = %addr,
-                port = addr.port(),
-                "Failed to bind to address"
-            );
-            std::process::exit(1);
-        }
-    };
-
-    info!(
-        addr = %addr,
-        "Server successfully bound to address"
-    );
-
-    let result = server::serve_integrated(listener, app_state, shutdown_signal()).await;
-    if let Err(error) = result {
-        error!(%error,"Server process failed");
-        std::process::exit(1);
-    }
+    server::serve_integrated(listener, app_state, shutdown_signal())
+        .await
+        .map_err(|error| error!(%error, "Server process failed"))
+        .map_err(failed)?;
     info!("Server shutdown complete");
+    Ok(())
 }
 
 fn shutdown_signal() -> impl std::future::Future<Output = ()> + Send + 'static {

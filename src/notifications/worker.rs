@@ -100,13 +100,6 @@ impl SlackReply {
             body,
         })
     }
-
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(header, _)| header.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
 }
 
 /// Slack の応答を配送結果に分類する。`None` は送信または応答の受信に失敗したこと。
@@ -120,7 +113,10 @@ pub(super) fn classify(reply: Option<&SlackReply>) -> Outcome {
     match reply.status_code {
         429 => Outcome::with_error(
             Retry,
-            retry_after_secs(reply.header("retry-after")),
+            retry_after_secs(crate::http_client::find_header(
+                &reply.headers,
+                "retry-after",
+            )),
             "slack rate limited",
         ),
         200..=299 => match SlackReplyBody::parse(&reply.body) {

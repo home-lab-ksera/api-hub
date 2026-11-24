@@ -125,9 +125,9 @@ pub async fn deliver(
         data.extend_from_slice(&chunk);
     }
     let valid = if file.content_type == "image/jpeg" {
-        data.starts_with(b"\xff\xd8\xff")
+        crate::media::is_jpeg(&data)
     } else {
-        data.starts_with(b"\x89PNG\r\n\x1a\n")
+        crate::media::is_png(&data)
     };
     if !valid {
         return Err(FileError::Failed("notification image signature invalid"));
