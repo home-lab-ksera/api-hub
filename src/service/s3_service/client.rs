@@ -49,29 +49,6 @@ pub(super) async fn send<T>(
     parse(&response).map_err(map_s3_runtime_error_to_api_error)
 }
 
-/// 署名済み URL と、送信時に付ける必要があるヘッダー。
-pub(super) fn presigned_json(output: &shiguredo_s3::api::PresignedRequest) -> String {
-    nojson::json(|f| {
-        f.object(|f| {
-            f.member("url", &output.url)?;
-            f.member("method", &output.method)?;
-            f.member(
-                "headers",
-                nojson::array(|f| {
-                    for (name, value) in &output.headers {
-                        f.element(nojson::object(|f| {
-                            f.member("name", name)?;
-                            f.member("value", value)
-                        }))?;
-                    }
-                    Ok(())
-                }),
-            )
-        })
-    })
-    .to_string()
-}
-
 pub(super) async fn execute_s3(
     http_client: &HttpClient,
     request: S3Request,

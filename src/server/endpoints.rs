@@ -98,23 +98,11 @@ async fn browser_open(app_state: &AppState, query: Option<&str>) -> Result<Respo
             .into_owned()
             .collect();
     let body = nojson::json(|f| f.value(&fields)).to_string();
-    let response = s3_handler::browser_get_object(app_state, body.as_bytes()).await?;
-    if response.status_code != 200 {
-        return Ok(response);
-    }
-    let signed = std::str::from_utf8(&response.body)
-        .ok()
-        .and_then(|text| nojson::RawJson::parse(text).ok())
-        .ok_or_else(|| ApiError::InternalServerError("Invalid signed response".into()))?;
-    let location = signed
-        .value()
-        .to_member("url")
-        .ok()
-        .and_then(|member| member.optional())
-        .and_then(|url| String::try_from(url).ok())
-        .ok_or_else(|| ApiError::InternalServerError("Missing signed URL".into()))?;
+    let Some(signed) = s3_handler::browser_presign(app_state, body.as_bytes())? else {
+        return Ok(s3_handler::browser_unavailable());
+    };
     Ok(Response::new(307, "Temporary Redirect")
-        .header("Location", &location)
+        .header("Location", &signed.url)
         .header("Cache-Control", "no-store")
         .header("Referrer-Policy", "no-referrer"))
 }

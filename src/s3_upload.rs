@@ -89,10 +89,11 @@ pub(crate) async fn upload(
             if !part.is_empty() {
                 upload.write_part(&state.client, part).await?;
             }
-            upload.finish(&state.client).await
+            let output = upload.finish(&state.client).await?;
+            Ok((output.e_tag, output.version_id))
         } else {
             // Small and empty objects need no multipart session.
-            s3_service::put_object(
+            let output = s3_service::put_object(
                 &state.client,
                 &state.settings,
                 PutObjectInput {
@@ -102,7 +103,8 @@ pub(crate) async fn upload(
                     content_type: Some(content_type.into()),
                 },
             )
-            .await
+            .await?;
+            Ok((output.e_tag, output.version_id))
         }
     }
     .await;
@@ -112,10 +114,17 @@ pub(crate) async fn upload(
     {
         tracing::warn!(%error, "Failed to abort streaming multipart upload");
     }
-    result.map(|body| {
+    // 小さいファイルでも multipart でも、同じ形で返す。
+    result.map(|(e_tag, version_id)| {
+        let body = nojson::json(|f| {
+            f.object(|f| {
+                f.member("e_tag", &e_tag)?;
+                f.member("version_id", &version_id)
+            })
+        });
         Response::new(200, "OK")
             .header("Content-Type", "application/json")
-            .body(body.into_bytes())
+            .body(body.to_string().into_bytes())
     })
 }
 
