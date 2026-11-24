@@ -139,8 +139,9 @@ fn response(status: u16, body: impl DisplayJson) -> Response {
         .body(nojson::json(|f| f.value(&body)).to_string().into_bytes())
 }
 
+/// 理由を `detail` に入れた problem details。HTTP 層の汎用の problem details に置き換えられない。
 fn error(status: u16, message: &str) -> Response {
-    response(status, nojson::object(|f| f.member("error", message)))
+    crate::errors::api_error::problem_details_response(status, message)
 }
 
 fn accepted(id: i64, state: &str) -> Response {
