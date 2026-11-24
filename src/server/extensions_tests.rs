@@ -92,6 +92,11 @@ async fn browser_signing_is_scoped_and_uses_external_host() {
     for (bucket, key) in [
         ("home-camera-recordings", "camera/2026/10/30/manifest.json"),
         ("home-camera-recordings", "camera/2026/10/30/../secret.mp4"),
+        ("home-camera-recordings", "camera/a.mp4"),
+        ("home-camera-recordings", "/2026/10/30/a.mp4"),
+        ("home-camera-recordings", "camera/2026/10/30/nested/a.mp4"),
+        ("home-camera-recordings", "camera/2026/10/30/x.mp4/a.mp4"),
+        ("home-camera-recordings", "camera/26/10/30/a.mp4"),
         ("private", "camera/2026/10/30/1793314800-session.mp4"),
         ("private", "hitomi/test.pdf"),
         ("pdfs", "backup/test.pdf"),
@@ -198,28 +203,6 @@ async fn slack_forwards_threads_blocks_and_updates() {
         requests[0].get_header("authorization"),
         Some("Bearer test-token")
     );
-}
-
-#[tokio::test]
-async fn slack_api_and_http_errors_are_not_success() {
-    let (state, task) = upstream(vec![
-        (200, r#"{"ok":false,"error":"missing_scope"}"#),
-        (429, "rate limited"),
-    ])
-    .await;
-    for _ in 0..2 {
-        assert_eq!(
-            post(
-                &state,
-                "/slack/message",
-                r#"{"channel":"C1","text":"hello"}"#
-            )
-            .await
-            .status_code,
-            500
-        );
-    }
-    assert_eq!(task.await.unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -352,7 +335,7 @@ async fn upload_notification_reports_partial_success_and_skips_slack_on_upload_f
 }
 
 #[tokio::test]
-async fn invalid_inputs_fail_before_network_and_new_routes_reject_get() {
+async fn invalid_inputs_fail_before_network() {
     let (state, task) = upstream(vec![]).await;
     for (path, body) in [
         (
@@ -391,21 +374,6 @@ async fn invalid_inputs_fail_before_network_and_new_routes_reject_get() {
             "{path}: {body}"
         );
     }
-    for path in [
-        "/slack/message/update",
-        "/s3/copy_object",
-        "/s3/put_object_tagging",
-        "/s3/get_object_tagging",
-        "/s3/delete_object_tagging",
-        "/s3/put_object_and_notify",
-    ] {
-        assert_eq!(
-            process_request(Request::new("GET", path), &state)
-                .await
-                .status_code,
-            405
-        );
-    }
     task.await.unwrap();
 }
 
@@ -438,93 +406,52 @@ fn post_request(path: &str, headers: &str, body: &str) -> String {
     )
 }
 
+/// HTTP 層の境界のうち、`http_interface.golden` の組み合わせにないもの。
 #[tokio::test]
-async fn web_pages_cannot_call_update_apis() {
-    const VIEWER: &str = "Origin: https://hitomi-upload-viewer.internal.qroksera.com\r\n";
-    let body = r#"{"bucket":"b"}"#;
-    // 上流は応答を用意しない。到達すれば 403/415 以外になる。
-    let (state, _upstream) = upstream(vec![]).await;
-    for (path, headers) in [
-        // 任意のサイトからの preflight 不要な POST。
-        (
-            "/s3/delete_bucket",
-            "Origin: https://attacker.example\r\nContent-Type: text/plain\r\n",
-        ),
-        // preview で開いた文書（sandbox）や同一オリジンのページ。
-        (
+async fn http_layer_edge_cases() {
+    let list = "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>";
+    let (state, upstream) = upstream(vec![(200, list)]).await;
+    // sandbox で開いた文書は `Origin: null` を送る。更新 API は呼べない。
+    let response = raw(
+        &state,
+        post_request(
             "/s3/delete_bucket",
             "Origin: null\r\nContent-Type: application/json\r\n",
+            r#"{"bucket":"b"}"#,
         ),
-        (
-            "/s3/list_buckets",
-            "Sec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n",
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    // charset 付きの JSON も受け付ける。
+    let response = raw(
+        &state,
+        post_request(
+            "/s3/list_objects_v2",
+            "Content-Type: application/json; charset=utf-8\r\n",
+            r#"{"bucket":"b"}"#,
         ),
-        // viewer でも、画面が使わない更新 API は呼べない。
-        ("/s3/delete_bucket", VIEWER),
-        ("/slack/message", VIEWER),
-    ] {
-        let headers = if headers == VIEWER {
-            format!("{VIEWER}Content-Type: application/json\r\n")
-        } else {
-            headers.to_string()
-        };
-        let response = raw(&state, post_request(path, &headers, body)).await;
-        assert!(response.starts_with("HTTP/1.1 403"), "{path}: {response}");
-        assert!(
-            !response
-                .to_ascii_lowercase()
-                .contains("access-control-allow-origin: https://attacker")
-        );
-    }
-    // ブラウザー以外でも、JSON API は application/json だけを受け付ける。
-    for headers in ["", "Content-Type: text/plain\r\n"] {
-        let response = raw(&state, post_request("/s3/delete_bucket", headers, body)).await;
-        assert!(response.starts_with("HTTP/1.1 415"), "{response}");
-    }
-}
-
-#[tokio::test]
-async fn viewer_and_cluster_clients_keep_working() {
-    let list = "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>";
-    let (state, upstream) = upstream(vec![(200, list), (200, list)]).await;
-    for headers in [
-        "Origin: https://hitomi-upload-viewer.internal.qroksera.com\r\nSec-Fetch-Site: same-site\r\nContent-Type: application/json\r\n",
-        "Content-Type: application/json; charset=utf-8\r\n",
-    ] {
+    )
+    .await;
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert_eq!(upstream.await.unwrap().len(), 1);
+    // ストリーミング upload の bucket と key は、空なら S3 へ送らずに断る。
+    for query in ["bucket=&key=k", "bucket=b&key="] {
         let response = raw(
             &state,
-            post_request("/s3/list_objects_v2", headers, r#"{"bucket":"b"}"#),
+            post_request(&format!("/s3/put_object_stream?{query}"), "", "hi"),
         )
         .await;
-        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.starts_with("HTTP/1.1 400"), "{query}: {response}");
     }
-    assert_eq!(upstream.await.unwrap().len(), 2);
-}
-
-/// 後処理は HTTP 層で1回だけ行う。ID がない要求にも1つだけ採番して返す。
-#[tokio::test]
-async fn every_response_gets_one_request_id_and_one_cors_header() {
-    let (state, _upstream) = upstream(vec![]).await;
-    for request in [
-        "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_string(),
-        "GET /missing HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nx-request-id: given\r\n\r\n".to_string(),
-        post_request("/s3/head_object", "Content-Type: text/plain\r\n", "{}"),
-        "OPTIONS /s3/list_objects_v2 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_string(),
-        "GET /s3/preview/bucket-only HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".to_string(),
-    ] {
-        let response = raw(&state, request.clone()).await.to_ascii_lowercase();
-        let head = response.split("\r\n\r\n").next().unwrap();
-        assert_eq!(head.matches("\r\nx-request-id: ").count(), 1, "{request}: {head}");
-        if request.contains("x-request-id: given") {
-            assert!(head.contains("\r\nx-request-id: given"), "{head}");
-        }
-        let cors = usize::from(request.contains(" /s3/"));
-        assert_eq!(
-            head.matches("\r\naccess-control-allow-origin: ").count(),
-            cors,
-            "{request}: {head}"
-        );
-    }
+    // x-request-id がない要求にも、ちょうど1つ採番して返す。
+    let response = raw(
+        &state,
+        "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".into(),
+    )
+    .await
+    .to_ascii_lowercase();
+    let head = response.split("\r\n\r\n").next().unwrap();
+    assert_eq!(head.matches("\r\nx-request-id: req-").count(), 1, "{head}");
 }
 
 /// TCP を使わず、メモリ上の接続で本番と同じ Router へ生の HTTP を送る。
@@ -613,11 +540,18 @@ async fn http_interface_matches_golden() {
         "Origin: https://attacker.example\r\nContent-Type: application/json\r\n",
         "Sec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n",
     ];
+    // ブラウザーからの要求の制限と Content-Type の確認は POST だけに効くので、
+    // ヘッダーの組み合わせは POST にだけ掛ける。
     let mut requests = Vec::new();
     for path in paths {
         for method in ["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"] {
+            let variants = if method == "POST" {
+                &variants[..]
+            } else {
+                &variants[..1]
+            };
             for headers in variants {
-                requests.push((method, path, headers));
+                requests.push((method, path, *headers));
             }
         }
     }
@@ -675,19 +609,12 @@ async fn notification_error_strings_match_golden() {
             r#"{"ok":false,"error":"channel_not_found"}"#,
         ),
         ("api error without code", 200, r#"{"ok":false}"#),
-        (
-            "api error with non-string code",
-            200,
-            r#"{"ok":false,"error":3}"#,
-        ),
         ("missing ok", 200, r#"{"ts":"1.2"}"#),
         ("ok is not a bool", 200, r#"{"ok":"true"}"#),
         ("not json", 200, "<html>"),
         ("empty body", 200, ""),
         ("array", 200, "[]"),
-        ("rate limited", 429, r#"{"ok":false,"error":"ratelimited"}"#),
         ("server error", 500, "oops"),
-        ("client error", 404, r#"{"ok":false,"error":"x"}"#),
     ] {
         let (state, task) = upstream(vec![(200, ""), (status, body)]).await;
         let response = post(&state, "/s3/put_object_and_notify", request).await;

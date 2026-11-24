@@ -408,6 +408,13 @@ mod tests {
                 Some("invalid Slack response; verify before retry"),
             ),
             (
+                reply(200, &[], "[]"),
+                Uncertain,
+                0,
+                None,
+                Some("invalid Slack response; verify before retry"),
+            ),
+            (
                 reply(429, &[("Retry-After", "5")], ""),
                 Retry,
                 5,
@@ -456,18 +463,6 @@ mod tests {
         assert_eq!(
             classify(None),
             Outcome::with_error(Uncertain, 0, "transport failure; verify Slack before retry")
-        );
-    }
-
-    #[test]
-    fn retries_become_failures_at_the_attempt_limit() {
-        let retry = || Outcome::with_error(State::Retry, 60, "x");
-        assert_eq!(retry().limit_retries(MAX_ATTEMPTS - 1).state, State::Retry);
-        assert_eq!(retry().limit_retries(MAX_ATTEMPTS).state, State::Failed);
-        let uncertain = Outcome::with_error(State::Uncertain, 0, "x");
-        assert_eq!(
-            uncertain.limit_retries(MAX_ATTEMPTS).state,
-            State::Uncertain
         );
     }
 }

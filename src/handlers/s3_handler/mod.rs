@@ -87,27 +87,6 @@ pub(super) fn is_camera_recording_key(key: &str) -> bool {
         && parts[4].len() > 4
 }
 
-#[cfg(test)]
-mod camera_viewer_tests {
-    use super::is_camera_recording_key;
-
-    #[test]
-    fn camera_recording_scope() {
-        assert!(is_camera_recording_key(
-            "camera/2026/10/30/1793314800-session.mp4"
-        ));
-        for key in [
-            "camera/../10/30/a.mp4",
-            "camera/2026/10/30/a.json",
-            "camera/a.mp4",
-            "/2026/10/30/a.mp4",
-            "camera/2026/10/30/nested/a.mp4",
-        ] {
-            assert!(!is_camera_recording_key(key), "{key}");
-        }
-    }
-}
-
 /// 内部viewer専用。通常のS3 APIとは別に、公開する保存領域と署名期限を固定する。
 pub async fn browser_get_object(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     match browser_presign(app_state, body)? {

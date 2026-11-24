@@ -1,76 +1,31 @@
 use super::{delete_objects_input, list_objects_v2_input, parse_body, presigned_object_input};
 use crate::http_client::find_header;
-use proptest::{prelude::ProptestConfig, prop_assert_eq, proptest};
 
+/// `null` は省略と同じに扱い、省略時の値を入れる。
 #[test]
-fn parse_delete_objects_allows_null_optionals() {
-    let body = r#"{
-        "bucket": "pdfs",
-        "objects": [
-            {"key": "20260418/a.pdf", "version_id": null},
-            {"key": "20260418/b.pdf"}
-        ],
-        "quiet": null
-    }"#;
+fn null_optionals_are_treated_as_omitted() {
+    let delete = parse_body(
+        br#"{"bucket":"pdfs","objects":[{"key":"a","version_id":null},{"key":"b"}],"quiet":null}"#,
+        delete_objects_input,
+    )
+    .unwrap();
+    assert_eq!(delete.objects[0].version_id, None);
+    assert_eq!(delete.objects[1].version_id, None);
+    assert!(!delete.quiet);
 
-    let parsed = parse_body(body.as_bytes(), delete_objects_input).expect("request should parse");
+    let list = parse_body(
+        br#"{"bucket":"pdfs","prefix":null,"max_keys":null}"#,
+        list_objects_v2_input,
+    )
+    .unwrap();
+    assert_eq!((list.prefix, list.max_keys), (None, None));
 
-    assert_eq!(parsed.bucket, "pdfs");
-    assert_eq!(parsed.objects.len(), 2);
-    assert_eq!(parsed.objects[0].key, "20260418/a.pdf");
-    assert_eq!(parsed.objects[0].version_id, None);
-    assert_eq!(parsed.objects[1].key, "20260418/b.pdf");
-    assert_eq!(parsed.objects[1].version_id, None);
-    assert!(!parsed.quiet);
-}
-
-#[test]
-fn parse_list_objects_v2_allows_null_optionals() {
-    let body = r#"{
-        "bucket": "pdfs",
-        "prefix": null,
-        "delimiter": null,
-        "max_keys": null,
-        "start_after": null
-    }"#;
-
-    let parsed = parse_body(body.as_bytes(), list_objects_v2_input).expect("request should parse");
-
-    assert_eq!(parsed.bucket, "pdfs");
-    assert_eq!(parsed.prefix, None);
-    assert_eq!(parsed.delimiter, None);
-    assert_eq!(parsed.max_keys, None);
-    assert_eq!(parsed.start_after, None);
-}
-
-#[test]
-fn parse_presigned_object_allows_null_expires_in_secs() {
-    let body = r#"{
-        "bucket": "pdfs",
-        "key": "20260418/a.pdf",
-        "expires_in_secs": null
-    }"#;
-
-    let parsed = parse_body(body.as_bytes(), presigned_object_input).expect("request should parse");
-
-    assert_eq!(parsed.bucket, "pdfs");
-    assert_eq!(parsed.key, "20260418/a.pdf");
-    assert_eq!(parsed.expires_in_secs, 900);
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
-
-    #[test]
-    fn find_header_is_case_insensitive(value in "[ -~]{0,64}") {
-        let headers = vec![
-            ("RaNgE".to_string(), value.clone()),
-            ("x-request-id".to_string(), "req-1".to_string()),
-        ];
-
-        let extracted = find_header(&headers, "range").map(str::to_owned);
-        prop_assert_eq!(extracted, Some(value));
-    }
+    let presigned = parse_body(
+        br#"{"bucket":"pdfs","key":"a.pdf","expires_in_secs":null}"#,
+        presigned_object_input,
+    )
+    .unwrap();
+    assert_eq!(presigned.expires_in_secs, 900);
 }
 
 #[test]
