@@ -142,27 +142,27 @@ HEAD /metrics [Content-Type: text/plain] => HTTP/1.1 405 Method Not Allowed | co
 HEAD /metrics [Origin: https://hitomi-upload-viewer.internal.qroksera.com; Content-Type: application/json] => HTTP/1.1 405 Method Not Allowed | connection: close, content-length: 115, content-type: application/problem+json, x-request-id: fixed | 
 HEAD /metrics [Origin: https://attacker.example; Content-Type: application/json] => HTTP/1.1 405 Method Not Allowed | connection: close, content-length: 115, content-type: application/problem+json, x-request-id: fixed | 
 HEAD /metrics [Sec-Fetch-Site: same-origin; Content-Type: application/json] => HTTP/1.1 405 Method Not Allowed | connection: close, content-length: 115, content-type: application/problem+json, x-request-id: fixed | 
-GET /openapi.json [Content-Type: application/json] => HTTP/1.1 200 OK | connection: close, content-length: 68866, content-type: application/json, x-request-id: fixed | <68866 bytes> {
+GET /openapi.json [Content-Type: application/json] => HTTP/1.1 200 OK | connection: close, content-length: 70083, content-type: application/json, x-request-id: fixed | <70083 bytes> {
   "openapi": "3.1.0",
   "info": {
     "title": "api-hub Wrappe…
-GET /openapi.json [] => HTTP/1.1 200 OK | connection: close, content-length: 68866, content-type: application/json, x-request-id: fixed | <68866 bytes> {
+GET /openapi.json [] => HTTP/1.1 200 OK | connection: close, content-length: 70083, content-type: application/json, x-request-id: fixed | <70083 bytes> {
   "openapi": "3.1.0",
   "info": {
     "title": "api-hub Wrappe…
-GET /openapi.json [Content-Type: text/plain] => HTTP/1.1 200 OK | connection: close, content-length: 68866, content-type: application/json, x-request-id: fixed | <68866 bytes> {
+GET /openapi.json [Content-Type: text/plain] => HTTP/1.1 200 OK | connection: close, content-length: 70083, content-type: application/json, x-request-id: fixed | <70083 bytes> {
   "openapi": "3.1.0",
   "info": {
     "title": "api-hub Wrappe…
-GET /openapi.json [Origin: https://hitomi-upload-viewer.internal.qroksera.com; Content-Type: application/json] => HTTP/1.1 200 OK | connection: close, content-length: 68866, content-type: application/json, x-request-id: fixed | <68866 bytes> {
+GET /openapi.json [Origin: https://hitomi-upload-viewer.internal.qroksera.com; Content-Type: application/json] => HTTP/1.1 200 OK | connection: close, content-length: 70083, content-type: application/json, x-request-id: fixed | <70083 bytes> {
   "openapi": "3.1.0",
   "info": {
     "title": "api-hub Wrappe…
-GET /openapi.json [Origin: https://attacker.example; Content-Type: application/json] => HTTP/1.1 200 OK | connection: close, content-length: 68866, content-type: application/json, x-request-id: fixed | <68866 bytes> {
+GET /openapi.json [Origin: https://attacker.example; Content-Type: application/json] => HTTP/1.1 200 OK | connection: close, content-length: 70083, content-type: application/json, x-request-id: fixed | <70083 bytes> {
   "openapi": "3.1.0",
   "info": {
     "title": "api-hub Wrappe…
-GET /openapi.json [Sec-Fetch-Site: same-origin; Content-Type: application/json] => HTTP/1.1 200 OK | connection: close, content-length: 68866, content-type: application/json, x-request-id: fixed | <68866 bytes> {
+GET /openapi.json [Sec-Fetch-Site: same-origin; Content-Type: application/json] => HTTP/1.1 200 OK | connection: close, content-length: 70083, content-type: application/json, x-request-id: fixed | <70083 bytes> {
   "openapi": "3.1.0",
   "info": {
     "title": "api-hub Wrappe…

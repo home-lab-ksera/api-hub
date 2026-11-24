@@ -70,7 +70,10 @@ impl StreamingUpload {
         Ok(())
     }
 
-    pub async fn finish(&self, http: &HttpClient) -> Result<String, ApiError> {
+    pub async fn finish(
+        &self,
+        http: &HttpClient,
+    ) -> Result<shiguredo_s3::types::CompleteMultipartUploadOutput, ApiError> {
         let output = send(
             http,
             self.s3
@@ -85,13 +88,7 @@ impl StreamingUpload {
             shiguredo_s3::api::CompleteMultipartUploadFluentBuilder::parse_response,
         )
         .await?;
-        Ok(nojson::json(|f| {
-            f.object(|f| {
-                f.member("e_tag", &output.e_tag)?;
-                f.member("version_id", &output.version_id)
-            })
-        })
-        .to_string())
+        Ok(output)
     }
 
     pub async fn abort(&self, http: &HttpClient) -> Result<(), ApiError> {

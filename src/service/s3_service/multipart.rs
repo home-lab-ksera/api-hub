@@ -6,7 +6,7 @@ pub async fn create_multipart_upload(
     http_client: &HttpClient,
     settings: &Settings,
     input: CreateMultipartUploadInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::CreateMultipartUploadOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let mut req = s3
         .create_multipart_upload()
@@ -23,21 +23,14 @@ pub async fn create_multipart_upload(
     )
     .await?;
 
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("bucket", &output.bucket)?;
-            f.member("key", &output.key)?;
-            f.member("upload_id", &output.upload_id)
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 pub async fn upload_part(
     http_client: &HttpClient,
     settings: &Settings,
     input: UploadPartInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::UploadPartOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let output = send(
         http_client,
@@ -52,14 +45,14 @@ pub async fn upload_part(
     )
     .await?;
 
-    Ok(nojson::json(|f| f.object(|f| f.member("e_tag", &output.e_tag))).to_string())
+    Ok(output)
 }
 
 pub async fn complete_multipart_upload(
     http_client: &HttpClient,
     settings: &Settings,
     input: CompleteMultipartUploadInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::CompleteMultipartUploadOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let multipart_upload = CompletedMultipartUpload {
         parts: Some(
@@ -86,23 +79,14 @@ pub async fn complete_multipart_upload(
     )
     .await?;
 
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("location", &output.location)?;
-            f.member("bucket", &output.bucket)?;
-            f.member("key", &output.key)?;
-            f.member("e_tag", &output.e_tag)?;
-            f.member("version_id", &output.version_id)
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 pub async fn abort_multipart_upload(
     http_client: &HttpClient,
     settings: &Settings,
     input: AbortMultipartUploadInput,
-) -> Result<String, ApiError> {
+) -> Result<(), ApiError> {
     let s3 = create_s3_client(settings)?;
     send(
         http_client,
@@ -115,14 +99,14 @@ pub async fn abort_multipart_upload(
     )
     .await?;
 
-    Ok(nojson::json(|f| f.object(|f| f.member("aborted", true))).to_string())
+    Ok(())
 }
 
 pub async fn list_parts(
     http_client: &HttpClient,
     settings: &Settings,
     input: ListPartsInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::ListPartsOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let mut req = s3
         .list_parts()
@@ -142,42 +126,14 @@ pub async fn list_parts(
         shiguredo_s3::api::ListPartsFluentBuilder::parse_response,
     )
     .await?;
-    let parts = output.parts.unwrap_or_default();
-
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("bucket", &output.bucket)?;
-            f.member("key", &output.key)?;
-            f.member("upload_id", &output.upload_id)?;
-            f.member("part_number_marker", output.part_number_marker)?;
-            f.member("next_part_number_marker", output.next_part_number_marker)?;
-            f.member("max_parts", output.max_parts)?;
-            f.member("is_truncated", output.is_truncated)?;
-            f.member("storage_class", &output.storage_class)?;
-            f.member(
-                "parts",
-                nojson::array(|f| {
-                    for part in &parts {
-                        f.element(nojson::object(|f| {
-                            f.member("part_number", part.part_number)?;
-                            f.member("last_modified", &part.last_modified)?;
-                            f.member("e_tag", &part.e_tag)?;
-                            f.member("size", part.size)
-                        }))?;
-                    }
-                    Ok(())
-                }),
-            )
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 pub async fn list_multipart_uploads(
     http_client: &HttpClient,
     settings: &Settings,
     input: ListMultipartUploadsInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::ListMultipartUploadsOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let mut req = s3.list_multipart_uploads().bucket(input.bucket);
     if let Some(prefix) = input.prefix {
@@ -202,44 +158,5 @@ pub async fn list_multipart_uploads(
         shiguredo_s3::api::ListMultipartUploadsFluentBuilder::parse_response,
     )
     .await?;
-    let uploads = output.uploads.unwrap_or_default();
-    let common_prefixes = output.common_prefixes.unwrap_or_default();
-
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("bucket", &output.bucket)?;
-            f.member("key_marker", &output.key_marker)?;
-            f.member("upload_id_marker", &output.upload_id_marker)?;
-            f.member("next_key_marker", &output.next_key_marker)?;
-            f.member("next_upload_id_marker", &output.next_upload_id_marker)?;
-            f.member("prefix", &output.prefix)?;
-            f.member("delimiter", &output.delimiter)?;
-            f.member("max_uploads", output.max_uploads)?;
-            f.member("is_truncated", output.is_truncated)?;
-            f.member(
-                "uploads",
-                nojson::array(|f| {
-                    for upload in &uploads {
-                        f.element(nojson::object(|f| {
-                            f.member("upload_id", &upload.upload_id)?;
-                            f.member("key", &upload.key)?;
-                            f.member("initiated", &upload.initiated)?;
-                            f.member("storage_class", &upload.storage_class)
-                        }))?;
-                    }
-                    Ok(())
-                }),
-            )?;
-            f.member(
-                "common_prefixes",
-                nojson::array(|f| {
-                    for prefix in &common_prefixes {
-                        f.element(nojson::object(|f| f.member("prefix", &prefix.prefix)))?;
-                    }
-                    Ok(())
-                }),
-            )
-        })
-    })
-    .to_string())
+    Ok(output)
 }

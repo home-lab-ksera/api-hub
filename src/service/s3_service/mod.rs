@@ -21,7 +21,7 @@ pub async fn put_object(
     http_client: &HttpClient,
     settings: &Settings,
     input: PutObjectInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::PutObjectOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let mut req = s3
         .put_object()
@@ -39,20 +39,14 @@ pub async fn put_object(
     )
     .await?;
 
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("e_tag", &output.e_tag)?;
-            f.member("version_id", &output.version_id)
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 pub async fn get_object(
     http_client: &HttpClient,
     settings: &Settings,
     input: GetObjectInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::GetObjectOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let output = send(
         http_client,
@@ -64,18 +58,7 @@ pub async fn get_object(
     )
     .await?;
 
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("file_data_base64", BASE64_STANDARD.encode(&output.body))?;
-            f.member("content_type", &output.content_type)?;
-            f.member("content_length", output.content_length)?;
-            f.member("e_tag", &output.e_tag)?;
-            f.member("last_modified", &output.last_modified)?;
-            f.member("version_id", &output.version_id)?;
-            f.member("metadata", &output.metadata)
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 pub async fn get_object_proxy_stream(
@@ -125,7 +108,7 @@ pub async fn head_object(
     http_client: &HttpClient,
     settings: &Settings,
     input: HeadObjectInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::HeadObjectOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let request = s3
         .head_object()
@@ -140,24 +123,14 @@ pub async fn head_object(
     let output = shiguredo_s3::api::HeadObjectFluentBuilder::parse_response(&response)
         .map_err(map_s3_runtime_error_to_api_error)?;
 
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("content_type", &output.content_type)?;
-            f.member("content_length", output.content_length)?;
-            f.member("e_tag", &output.e_tag)?;
-            f.member("last_modified", &output.last_modified)?;
-            f.member("version_id", &output.version_id)?;
-            f.member("metadata", &output.metadata)
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 pub async fn delete_object(
     http_client: &HttpClient,
     settings: &Settings,
     input: DeleteObjectInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::DeleteObjectOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let output = send(
         http_client,
@@ -169,20 +142,14 @@ pub async fn delete_object(
     )
     .await?;
 
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("delete_marker", output.delete_marker)?;
-            f.member("version_id", &output.version_id)
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 pub async fn delete_objects(
     http_client: &HttpClient,
     settings: &Settings,
     input: DeleteObjectsInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::DeleteObjectsOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let mut req = s3.delete_objects().bucket(input.bucket).quiet(input.quiet);
     for object in input.objects {
@@ -199,51 +166,14 @@ pub async fn delete_objects(
     )
     .await?;
 
-    let deleted = output.deleted.unwrap_or_default();
-    let errors = output.errors.unwrap_or_default();
-
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member(
-                "deleted",
-                nojson::array(|f| {
-                    for deleted in &deleted {
-                        f.element(nojson::object(|f| {
-                            f.member("key", &deleted.key)?;
-                            f.member("version_id", &deleted.version_id)?;
-                            f.member("delete_marker", deleted.delete_marker)?;
-                            f.member(
-                                "delete_marker_version_id",
-                                &deleted.delete_marker_version_id,
-                            )
-                        }))?;
-                    }
-                    Ok(())
-                }),
-            )?;
-            f.member(
-                "errors",
-                nojson::array(|f| {
-                    for error in &errors {
-                        f.element(nojson::object(|f| {
-                            f.member("key", &error.key)?;
-                            f.member("code", &error.code)?;
-                            f.member("message", &error.message)
-                        }))?;
-                    }
-                    Ok(())
-                }),
-            )
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 pub async fn list_objects_v2(
     http_client: &HttpClient,
     settings: &Settings,
     input: ListObjectsV2Input,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::ListObjectsV2Output, ApiError> {
     let s3 = create_s3_client(settings)?;
     let mut req = s3.list_objects_v2().bucket(input.bucket);
     if let Some(prefix) = input.prefix {
@@ -268,50 +198,13 @@ pub async fn list_objects_v2(
     )
     .await?;
 
-    let contents = output.contents.unwrap_or_default();
-    let common_prefixes = output.common_prefixes.unwrap_or_default();
-
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("is_truncated", output.is_truncated)?;
-            f.member("name", &output.name)?;
-            f.member("prefix", &output.prefix)?;
-            f.member("delimiter", &output.delimiter)?;
-            f.member("max_keys", output.max_keys)?;
-            f.member("key_count", output.key_count)?;
-            f.member("continuation_token", &output.continuation_token)?;
-            f.member("next_continuation_token", &output.next_continuation_token)?;
-            f.member("start_after", &output.start_after)?;
-            f.member(
-                "contents",
-                nojson::array(|f| {
-                    for obj in &contents {
-                        f.element(nojson::object(|f| {
-                            f.member("key", &obj.key)?;
-                            f.member("last_modified", &obj.last_modified)?;
-                            f.member("e_tag", &obj.e_tag)?;
-                            f.member("size", obj.size)?;
-                            f.member("storage_class", &obj.storage_class)
-                        }))?;
-                    }
-                    Ok(())
-                }),
-            )?;
-            f.member(
-                "common_prefixes",
-                nojson::array(|f| {
-                    for prefix in &common_prefixes {
-                        f.element(nojson::object(|f| f.member("prefix", &prefix.prefix)))?;
-                    }
-                    Ok(())
-                }),
-            )
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
-pub fn presigned_get(settings: &Settings, input: PresignedObjectInput) -> Result<String, ApiError> {
+pub fn presigned_get(
+    settings: &Settings,
+    input: PresignedObjectInput,
+) -> Result<shiguredo_s3::api::PresignedRequest, ApiError> {
     let s3 = create_s3_client(settings)?;
     let output = s3
         .get_object()
@@ -320,10 +213,13 @@ pub fn presigned_get(settings: &Settings, input: PresignedObjectInput) -> Result
         .presigned(input.expires_in_secs)
         .map_err(map_s3_input_error_to_api_error)?;
 
-    Ok(presigned_json(&output))
+    Ok(output)
 }
 
-pub fn presigned_put(settings: &Settings, input: PresignedObjectInput) -> Result<String, ApiError> {
+pub fn presigned_put(
+    settings: &Settings,
+    input: PresignedObjectInput,
+) -> Result<shiguredo_s3::api::PresignedRequest, ApiError> {
     let s3 = create_s3_client(settings)?;
     let output = s3
         .put_object()
@@ -332,14 +228,14 @@ pub fn presigned_put(settings: &Settings, input: PresignedObjectInput) -> Result
         .presigned(input.expires_in_secs)
         .map_err(map_s3_input_error_to_api_error)?;
 
-    Ok(presigned_json(&output))
+    Ok(output)
 }
 
 pub async fn copy_object(
     http: &HttpClient,
     settings: &Settings,
     input: CopyObjectInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::CopyObjectOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let mut source = format!(
         "{}/{}",
@@ -364,22 +260,14 @@ pub async fn copy_object(
         shiguredo_s3::api::CopyObjectFluentBuilder::parse_response,
     )
     .await?;
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("e_tag", &output.e_tag)?;
-            f.member("last_modified", &output.last_modified)?;
-            f.member("version_id", &output.version_id)?;
-            f.member("copy_source_version_id", &output.copy_source_version_id)
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 pub async fn get_object_tagging(
     http: &HttpClient,
     settings: &Settings,
     input: ObjectTaggingInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::GetObjectTaggingOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let mut builder = s3.get_object_tagging().bucket(input.bucket).key(input.key);
     if let Some(version) = input.version_id {
@@ -391,25 +279,7 @@ pub async fn get_object_tagging(
         shiguredo_s3::api::GetObjectTaggingFluentBuilder::parse_response,
     )
     .await?;
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("version_id", &output.version_id)?;
-            f.member(
-                "tags",
-                nojson::array(|f| {
-                    for tag in &output.tag_set {
-                        f.element(nojson::object(|f| {
-                            f.member("key", &tag.key)?;
-                            f.member("value", &tag.value)
-                        }))?;
-                    }
-                    Ok(())
-                }),
-            )?;
-            Ok(())
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 pub async fn put_object_tagging(
@@ -417,7 +287,7 @@ pub async fn put_object_tagging(
     settings: &Settings,
     input: ObjectTaggingInput,
     tags: Vec<shiguredo_s3::types::Tag>,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::PutObjectTaggingOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let mut builder = s3.put_object_tagging().bucket(input.bucket).key(input.key);
     if let Some(version) = input.version_id {
@@ -430,20 +300,14 @@ pub async fn put_object_tagging(
         shiguredo_s3::api::PutObjectTaggingFluentBuilder::parse_response,
     )
     .await?;
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("version_id", &output.version_id)?;
-            Ok(())
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 pub async fn delete_object_tagging(
     http: &HttpClient,
     settings: &Settings,
     input: ObjectTaggingInput,
-) -> Result<String, ApiError> {
+) -> Result<shiguredo_s3::types::DeleteObjectTaggingOutput, ApiError> {
     let s3 = create_s3_client(settings)?;
     let mut builder = s3
         .delete_object_tagging()
@@ -458,13 +322,7 @@ pub async fn delete_object_tagging(
         shiguredo_s3::api::DeleteObjectTaggingFluentBuilder::parse_response,
     )
     .await?;
-    Ok(nojson::json(|f| {
-        f.object(|f| {
-            f.member("version_id", &output.version_id)?;
-            Ok(())
-        })
-    })
-    .to_string())
+    Ok(output)
 }
 
 #[cfg(test)]

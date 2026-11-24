@@ -1,13 +1,11 @@
+use api_hub::testing::assert_golden;
 use api_hub::{
     config::{settings::Settings, state::AppState},
     database,
     notifications::{self, Notification},
 };
 use sqlx::{Row, postgres::PgPoolOptions};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-};
+use tokio::{io::AsyncWriteExt, net::TcpListener};
 
 async fn isolated_pool() -> (sqlx::PgPool, sqlx::PgPool, String) {
     let admin = PgPoolOptions::new()
@@ -89,16 +87,7 @@ async fn durable_notifications() {
             (200, "", r#"{"ok":true,"ts":"123.4"}"#),
         ] {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut decoder = shiguredo_http11::RequestDecoder::new();
-            loop {
-                if decoder.decode().unwrap().is_some() {
-                    break;
-                }
-                let mut bytes = [0; 4096];
-                let n = socket.read(&mut bytes).await.unwrap();
-                assert!(n > 0);
-                decoder.feed(&bytes[..n]).unwrap();
-            }
+            api_hub::testing::read_request(&mut socket).await.unwrap();
             socket.write_all(format!("HTTP/1.1 {code} Test\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
         }
     });
@@ -143,13 +132,15 @@ async fn durable_notifications() {
     assert_eq!(
         notifications::handle_retry(&state, &expired.to_string())
             .await
-            .status_code,
+            .status()
+            .as_u16(),
         202
     );
     assert_eq!(
         notifications::handle_retry(&state, &id.to_string())
             .await
-            .status_code,
+            .status()
+            .as_u16(),
         409
     );
     sqlx::query("UPDATE notifications SET state='uncertain' WHERE id=$1")
@@ -176,16 +167,7 @@ async fn durable_notifications() {
                 ),
             ] {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let mut decoder = shiguredo_http11::RequestDecoder::new();
-                let request = loop {
-                    if let Some(request) = decoder.decode().unwrap() {
-                        break request;
-                    }
-                    let mut bytes = [0; 4096];
-                    let n = socket.read(&mut bytes).await.unwrap();
-                    assert!(n > 0);
-                    decoder.feed(&bytes[..n]).unwrap();
-                };
+                let request = api_hub::testing::read_request(&mut socket).await.unwrap();
                 if request.uri == "/files.completeUploadExternal" {
                     // 以前の serde_json の出力とバイト単位で同じ。
                     assert_eq!(
@@ -230,7 +212,10 @@ async fn durable_notifications() {
     shutdown_drains_one_delivery(&pool, &state).await;
     pool.close().await;
     assert_eq!(
-        api_hub::queue_metrics::handle(&state).await.status_code,
+        api_hub::queue_metrics::handle(&state)
+            .await
+            .status()
+            .as_u16(),
         503
     );
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
@@ -254,16 +239,7 @@ async fn shutdown_drains_one_delivery(pool: &sqlx::PgPool, state: &AppState) {
     let (release_tx, release_rx) = oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let mut decoder = shiguredo_http11::RequestDecoder::new();
-        loop {
-            if decoder.decode().unwrap().is_some() {
-                break;
-            }
-            let mut bytes = [0; 4096];
-            let n = socket.read(&mut bytes).await.unwrap();
-            assert!(n > 0);
-            decoder.feed(&bytes[..n]).unwrap();
-        }
+        api_hub::testing::read_request(&mut socket).await.unwrap();
         received_tx.send(()).unwrap();
         release_rx.await.unwrap();
         let body = r#"{"ok":true,"ts":"drained"}"#;
@@ -362,7 +338,10 @@ async fn shutdown_drains_one_delivery(pool: &sqlx::PgPool, state: &AppState) {
         .unwrap();
     assert!(last > 0.0);
     assert_eq!(
-        api_hub::queue_metrics::handle(&state).await.status_code,
+        api_hub::queue_metrics::handle(&state)
+            .await
+            .status()
+            .as_u16(),
         200
     );
 }
@@ -382,16 +361,7 @@ async fn integrated_api_delivers_and_drains_with_shared_three_connection_pool() 
     let (release, wait) = oneshot::channel();
     let fixture = tokio::spawn(async move {
         let (mut socket, _) = slack.accept().await.unwrap();
-        let mut decoder = shiguredo_http11::RequestDecoder::new();
-        let request = loop {
-            if let Some(request) = decoder.decode().unwrap() {
-                break request;
-            }
-            let mut chunk = [0; 4096];
-            let n = socket.read(&mut chunk).await.unwrap();
-            assert!(n > 0);
-            decoder.feed(&chunk[..n]).unwrap();
-        };
+        let request = api_hub::testing::read_request(&mut socket).await.unwrap();
         assert!(request.uri.ends_with("/chat.postMessage"));
         // 以前の serde_json の出力とバイト単位で同じ。
         assert_eq!(request.body, br#"{"channel":"C1","text":"fixture"}"#);
@@ -546,32 +516,6 @@ async fn migration_cli_does_not_load_http_settings_or_deliver() {
         .execute(&admin)
         .await
         .unwrap();
-}
-
-/// 期待値ファイルと比べる。`UPDATE_GOLDEN=1` のときは期待値を書き換える。
-fn assert_golden(name: &str, actual: &str) {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name);
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("{} is missing; run with UPDATE_GOLDEN=1", path.display()));
-    if expected != actual {
-        let first = expected
-            .lines()
-            .zip(actual.lines())
-            .position(|(e, a)| e != a)
-            .unwrap_or_else(|| expected.lines().count().min(actual.lines().count()));
-        panic!(
-            "{name} differs at line {}:\n  expected: {}\n  actual:   {}\nrun with UPDATE_GOLDEN=1 if the change is intended",
-            first + 1,
-            expected.lines().nth(first).unwrap_or("<end>"),
-            actual.lines().nth(first).unwrap_or("<end>"),
-        );
-    }
 }
 
 /// 通知 API の HTTP 応答と、DB に保存される payload を固定する。
@@ -735,19 +679,8 @@ async fn routed_upstream(
             let routes = routes.clone();
             let base = base.clone();
             tokio::spawn(async move {
-                let mut decoder = shiguredo_http11::RequestDecoder::with_limits(
-                    shiguredo_http11::DecoderLimits::unlimited(),
-                );
-                let request = loop {
-                    if let Some(request) = decoder.decode().unwrap() {
-                        break request;
-                    }
-                    let mut bytes = [0; 8192];
-                    let n = socket.read(&mut bytes).await.unwrap();
-                    if n == 0 {
-                        return;
-                    }
-                    decoder.feed(&bytes[..n]).unwrap();
+                let Some(request) = api_hub::testing::read_request(&mut socket).await else {
+                    return;
                 };
                 let path = request.uri.split('?').next().unwrap().to_string();
                 let (status, headers, body) = routes

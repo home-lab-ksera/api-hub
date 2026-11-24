@@ -13,10 +13,11 @@ pub async fn preview_object_stream(
     app_state: &AppState,
     bucket: String,
     key: String,
-    request_headers: &[(String, String)],
+    request_headers: &axum::http::HeaderMap,
 ) -> Result<PreviewObjectStreamResponse, ApiError> {
     // 条件付き GET と Range は、そのまま S3 へ渡す。
-    let forward = |name: &str| find_header(request_headers, name).map(str::to_owned);
+    let forward =
+        |name: &str| crate::reply::request_header(request_headers, name).map(str::to_owned);
     let s3_response = s3_service::get_object_proxy_stream(
         &app_state.client,
         &app_state.settings,

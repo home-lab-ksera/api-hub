@@ -269,6 +269,15 @@
             "$ref": "#/components/responses/ProblemDetails"
           }
         }
+      },
+      "options": {
+        "operationId": "s3PutObjectStreamPreflight",
+        "summary": "CORS preflight for streaming upload",
+        "responses": {
+          "204": {
+            "description": "No Content"
+          }
+        }
       }
     },
     "/health": {
@@ -283,6 +292,34 @@
                 "schema": {
                   "type": "string",
                   "example": "ok"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics",
+        "summary": "Notification queue metrics in the Prometheus text format",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Notification database unavailable",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
                 }
               }
             }
@@ -1159,6 +1196,15 @@
           },
           "default": {
             "$ref": "#/components/responses/ProblemDetails"
+          }
+        }
+      },
+      "options": {
+        "operationId": "s3BrowserGetObjectPreflight",
+        "summary": "CORS preflight for viewer signed GET",
+        "responses": {
+          "204": {
+            "description": "No Content"
           }
         }
       }

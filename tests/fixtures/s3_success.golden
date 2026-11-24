@@ -1,0 +1,25 @@
+/s3/put_object_base64 {"bucket":"b","key":"k","file_data_base64":"aGk=","content_type":"text/plain"} => 200 {"e_tag":"\"etag-1\"","version_id":"v1"}
+/s3/get_object_base64 {"bucket":"b","key":"k"} => 200 {"file_data_base64":"aGVsbG8=","content_type":"text/plain","content_length":5,"e_tag":"\"etag-1\"","last_modified":"Wed, 21 Oct 2026 07:28:00 GMT","version_id":"v1","metadata":{"owner":"me"}}
+/s3/head_object {"bucket":"b","key":"k"} => 200 {"content_type":"text/plain","content_length":0,"e_tag":"\"etag-1\"","last_modified":"Wed, 21 Oct 2026 07:28:00 GMT","version_id":null,"metadata":{"owner":"me"}}
+/s3/head_object {"bucket":"b","key":"missing"} => 404 {"type":"about:blank","title":"Not Found","status":404,"detail":"S3 object not found"}
+/s3/delete_object {"bucket":"b","key":"k"} => 200 {"delete_marker":true,"version_id":"v2"}
+/s3/delete_objects {"bucket":"b","objects":[{"key":"a"},{"key":"b","version_id":"v"}],"quiet":false} => 200 {"deleted":[{"key":"a","version_id":null,"delete_marker":null,"delete_marker_version_id":null},{"key":"b","version_id":"v","delete_marker":true,"delete_marker_version_id":"m"}],"errors":[{"key":"c","code":"AccessDenied","message":"no"}]}
+/s3/list_objects_v2 {"bucket":"b","prefix":"p/","delimiter":"/","max_keys":2} => 200 {"is_truncated":true,"name":"b","prefix":"p/","delimiter":"/","max_keys":2,"key_count":2,"continuation_token":null,"next_continuation_token":"t2","start_after":null,"contents":[{"key":"p/a.pdf","last_modified":"2026-10-21T07:28:00.000Z","e_tag":"\"e\"","size":12,"storage_class":"STANDARD"}],"common_prefixes":[{"prefix":"p/sub/"}]}
+/s3/copy_object {"bucket":"b","key":"k2","source_bucket":"b","source_key":"k"} => 200 {"e_tag":"\"etag-2\"","last_modified":"2026-10-21T07:28:00.000Z","version_id":"v3","copy_source_version_id":"v1"}
+/s3/get_object_tagging {"bucket":"b","key":"k"} => 200 {"version_id":"v1","tags":[{"key":"a","value":"1"},{"key":"b","value":"2"}]}
+/s3/put_object_tagging {"bucket":"b","key":"k","tags":[{"key":"a","value":"1"}]} => 200 {"version_id":"v1"}
+/s3/delete_object_tagging {"bucket":"b","key":"k"} => 200 {"version_id":"v1"}
+/s3/create_multipart_upload {"bucket":"b","key":"k","content_type":"video/mp4"} => 200 {"bucket":"b","key":"k","upload_id":"u1"}
+/s3/upload_part_base64 {"bucket":"b","key":"k","upload_id":"u1","part_number":1,"part_data_base64":"aGk="} => 200 {"e_tag":"\"p1\""}
+/s3/complete_multipart_upload {"bucket":"b","key":"k","upload_id":"u1","parts":[{"part_number":1,"e_tag":"\"p1\""}]} => 200 {"location":"http://s3/b/k","bucket":"b","key":"k","e_tag":"\"final\"","version_id":"v1"}
+/s3/abort_multipart_upload {"bucket":"b","key":"k","upload_id":"u1"} => 200 {"aborted":true}
+/s3/list_parts {"bucket":"b","key":"k","upload_id":"u1","max_parts":10} => 200 {"bucket":"b","key":"k","upload_id":"u1","part_number_marker":0,"next_part_number_marker":1,"max_parts":10,"is_truncated":false,"storage_class":"STANDARD","parts":[{"part_number":1,"last_modified":"2026-10-21T07:28:00.000Z","e_tag":"\"p1\"","size":2}]}
+/s3/list_multipart_uploads {"bucket":"b","prefix":"p/"} => 200 {"bucket":"b","key_marker":"","upload_id_marker":"","next_key_marker":"p/k","next_upload_id_marker":"u1","prefix":"p/","delimiter":null,"max_uploads":1000,"is_truncated":false,"uploads":[{"upload_id":"u1","key":"p/k","initiated":"2026-10-21T07:28:00.000Z","storage_class":"STANDARD"}],"common_prefixes":[{"prefix":"p/x/"}]}
+/s3/list_buckets {} => 200 {"continuation_token":null,"prefix":null,"buckets":[{"name":"b","creation_date":"2026-10-21T07:28:00.000Z","bucket_region":null,"bucket_arn":null}]}
+/s3/create_bucket {"bucket":"b"} => 200 {"location":"/b"}
+/s3/head_bucket {"bucket":"b"} => 200 {"bucket_region":"us-east-1"}
+/s3/delete_bucket {"bucket":"b"} => 200 {"deleted":true}
+/s3/put_object_and_notify {"bucket":"b","key":"k","file_data_base64":"aGk=","channel":"C1","text":"t"} => 200 {"uploaded":true,"object":{"e_tag":"\"etag-1\"","version_id":"v1"},"url":"<s3>/b/k?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=<masked>&X-Amz-Date=<masked>&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature=<masked>
+/s3/presigned_get_object => 200 {"url":"http://s3.test/b/a%20b.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=<masked>&X-Amz-Date=<masked>&X-Amz-Expires=60&X-Amz-SignedHeaders=host&X-Amz-Signature=<masked>
+/s3/presigned_put_object => 200 {"url":"http://s3.test/b/a%20b.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=<masked>&X-Amz-Date=<masked>&X-Amz-Expires=60&X-Amz-SignedHeaders=host&X-Amz-Signature=<masked>
+/s3/browser_get_object => 200 cache-control=Some("no-store") {"url":"https://s3.example/pdfs/hitomi/a.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=<masked>&X-Amz-Date=<masked>&X-Amz-Expires=900&X-Amz-SignedHeaders=host&X-Amz-Signature=<masked>

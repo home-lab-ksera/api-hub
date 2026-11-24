@@ -1,8 +1,9 @@
 use super::process_request;
 use crate::config::{settings::Settings, state::AppState};
-use shiguredo_http11::{Request, RequestDecoder, Response};
+use crate::testing::assert_golden;
+use shiguredo_http11::{Request, Response};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     net::TcpListener,
     task::JoinHandle,
     time::{Duration, timeout},
@@ -16,14 +17,7 @@ async fn upstream(replies: Vec<(u16, &'static str)>) -> (AppState, JoinHandle<Ve
             let mut requests = Vec::new();
             for (status, body) in replies {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let mut decoder = RequestDecoder::new();
-                let request = loop {
-                    if let Some(request) = decoder.decode().unwrap() { break request; }
-                    let mut buffer = [0; 4096];
-                    let n = socket.read(&mut buffer).await.unwrap();
-                    assert_ne!(n, 0);
-                    decoder.feed(&buffer[..n]).unwrap();
-                };
+                let request = crate::testing::read_request(&mut socket).await.unwrap();
                 requests.push(request);
                 let response = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 socket.write_all(response.as_bytes()).await.unwrap();
@@ -550,47 +544,13 @@ async fn raw_in_memory(state: &AppState, request: String) -> String {
     String::from_utf8(response).unwrap()
 }
 
-/// 期待値ファイルと比べる。`UPDATE_GOLDEN=1` のときは期待値を書き換える。
-pub(crate) fn assert_golden(name: &str, actual: &str) {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name);
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("{} is missing; run with UPDATE_GOLDEN=1", path.display()));
-    if expected != actual {
-        let first = expected
-            .lines()
-            .zip(actual.lines())
-            .position(|(e, a)| e != a)
-            .unwrap_or_else(|| expected.lines().count().min(actual.lines().count()));
-        panic!(
-            "{name} differs at line {}:\n  expected: {}\n  actual:   {}\nrun with UPDATE_GOLDEN=1 if the change is intended",
-            first + 1,
-            expected.lines().nth(first).unwrap_or("<end>"),
-            actual.lines().nth(first).unwrap_or("<end>"),
-        );
-    }
-}
-
 /// HTTP の I/F を固定する。経路・メソッド・ヘッダーの組み合わせごとに、
 /// 状態コード・ヘッダー・本文を期待値ファイルと比べる。上流には接続できない状態で実行する。
 #[tokio::test]
 async fn http_interface_matches_golden() {
-    // 上流はポートを持ち続け、接続をすぐ切る。閉じたポートが再利用されて
-    // 別の fixture へ届くことを防ぎ、上流に触れる要求の結果を毎回同じにする。
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", closed.local_addr().unwrap());
-    let refuser = tokio::spawn(async move {
-        loop {
-            if let Ok((socket, _)) = closed.accept().await {
-                drop(socket);
-            }
-        }
-    });
+    // 上流はポートを持ち続け、接続をすぐ切る。
+    let closing = crate::testing::ClosingUpstream::start().await;
+    let endpoint = closing.endpoint.clone();
     let (mut state, _upstream) = upstream(vec![]).await;
     state.settings.s3_endpoint = Some(endpoint.clone());
     state.settings.slack_api_base_url = endpoint;
@@ -695,7 +655,7 @@ async fn http_interface_matches_golden() {
         .buffered(32)
         .collect()
         .await;
-    refuser.abort();
+    drop(closing);
     let out = lines.concat();
     assert_golden("http_interface.golden", &out);
 }
@@ -754,21 +714,14 @@ async fn notification_error_strings_match_golden() {
         )
         .unwrap();
     }
-    // Slack へ接続できない場合。エラー文には URL が入るため、ポートを伏せる。
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", closed.local_addr().unwrap());
-    let refuser = tokio::spawn(async move {
-        loop {
-            if let Ok((socket, _)) = closed.accept().await {
-                drop(socket);
-            }
-        }
-    });
+    // 上流はポートを持ち続け、接続をすぐ切る。
+    let closing = crate::testing::ClosingUpstream::start().await;
+    let endpoint = closing.endpoint.clone();
     let (mut state, task) = upstream(vec![(200, "")]).await;
     state.settings.slack_api_base_url = endpoint.clone();
     let response = post(&state, "/s3/put_object_and_notify", request).await;
     task.await.unwrap();
-    refuser.abort();
+    drop(closing);
     let json = nojson::RawJson::parse(std::str::from_utf8(&response.body).unwrap()).unwrap();
     let error = json
         .value()
@@ -867,16 +820,7 @@ async fn slack_upload_requests_match_golden() {
             let mut requests = Vec::new();
             for (status, body) in replies {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let mut decoder = RequestDecoder::new();
-                let request = loop {
-                    if let Some(request) = decoder.decode().unwrap() {
-                        break request;
-                    }
-                    let mut buffer = [0; 4096];
-                    let n = socket.read(&mut buffer).await.unwrap();
-                    assert_ne!(n, 0);
-                    decoder.feed(&buffer[..n]).unwrap();
-                };
+                let request = crate::testing::read_request(&mut socket).await.unwrap();
                 requests.push(request);
                 let response = format!(
                     "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -921,4 +865,289 @@ async fn slack_upload_requests_match_golden() {
         }
     }
     assert_golden("slack_upload.golden", &out);
+}
+
+/// 決まった応答を1回だけ返す上流。
+async fn canned_upstream(status: u16, headers: &'static str, body: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        if crate::testing::read_request(&mut socket).await.is_none() {
+            return;
+        }
+        let response = format!(
+            "HTTP/1.1 {status} OK\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    endpoint
+}
+
+/// 署名付き URL の、実行ごとに変わる部分を伏せる。
+fn mask_signature(text: &str) -> String {
+    let mut out = String::new();
+    for part in text.split('&') {
+        if !out.is_empty() {
+            out.push('&');
+        }
+        match part.split_once('=') {
+            Some((name, _))
+                if ["X-Amz-Date", "X-Amz-Signature", "X-Amz-Credential"]
+                    .iter()
+                    .any(|masked| name.ends_with(masked)) =>
+            {
+                out.push_str(name);
+                out.push_str("=<masked>");
+            }
+            _ => out.push_str(part),
+        }
+    }
+    out
+}
+
+/// S3 の各操作が成功したときの応答本文を固定する。
+#[tokio::test]
+async fn s3_success_responses_match_golden() {
+    use std::fmt::Write;
+    let etag = "ETag: \"etag-1\"\r\nx-amz-version-id: v1\r\n";
+    let cases: &[(&str, &str, u16, &'static str, &'static str)] = &[
+        (
+            "/s3/put_object_base64",
+            r#"{"bucket":"b","key":"k","file_data_base64":"aGk=","content_type":"text/plain"}"#,
+            200,
+            etag,
+            "",
+        ),
+        (
+            "/s3/get_object_base64",
+            r#"{"bucket":"b","key":"k"}"#,
+            200,
+            "Content-Type: text/plain\r\nETag: \"etag-1\"\r\nLast-Modified: Wed, 21 Oct 2026 07:28:00 GMT\r\nx-amz-version-id: v1\r\nx-amz-meta-owner: me\r\n",
+            "hello",
+        ),
+        (
+            "/s3/head_object",
+            r#"{"bucket":"b","key":"k"}"#,
+            200,
+            "Content-Type: text/plain\r\nETag: \"etag-1\"\r\nLast-Modified: Wed, 21 Oct 2026 07:28:00 GMT\r\nx-amz-meta-owner: me\r\n",
+            "",
+        ),
+        (
+            "/s3/head_object",
+            r#"{"bucket":"b","key":"missing"}"#,
+            404,
+            "",
+            "",
+        ),
+        (
+            "/s3/delete_object",
+            r#"{"bucket":"b","key":"k"}"#,
+            204,
+            "x-amz-delete-marker: true\r\nx-amz-version-id: v2\r\n",
+            "",
+        ),
+        (
+            "/s3/delete_objects",
+            r#"{"bucket":"b","objects":[{"key":"a"},{"key":"b","version_id":"v"}],"quiet":false}"#,
+            200,
+            "",
+            "<DeleteResult><Deleted><Key>a</Key></Deleted><Deleted><Key>b</Key><VersionId>v</VersionId><DeleteMarker>true</DeleteMarker><DeleteMarkerVersionId>m</DeleteMarkerVersionId></Deleted><Error><Key>c</Key><Code>AccessDenied</Code><Message>no</Message></Error></DeleteResult>",
+        ),
+        (
+            "/s3/list_objects_v2",
+            r#"{"bucket":"b","prefix":"p/","delimiter":"/","max_keys":2}"#,
+            200,
+            "",
+            "<ListBucketResult><Name>b</Name><Prefix>p/</Prefix><Delimiter>/</Delimiter><MaxKeys>2</MaxKeys><KeyCount>2</KeyCount><IsTruncated>true</IsTruncated><NextContinuationToken>t2</NextContinuationToken><Contents><Key>p/a.pdf</Key><LastModified>2026-10-21T07:28:00.000Z</LastModified><ETag>\"e\"</ETag><Size>12</Size><StorageClass>STANDARD</StorageClass></Contents><CommonPrefixes><Prefix>p/sub/</Prefix></CommonPrefixes></ListBucketResult>",
+        ),
+        (
+            "/s3/copy_object",
+            r#"{"bucket":"b","key":"k2","source_bucket":"b","source_key":"k"}"#,
+            200,
+            "x-amz-version-id: v3\r\nx-amz-copy-source-version-id: v1\r\n",
+            "<CopyObjectResult><ETag>\"etag-2\"</ETag><LastModified>2026-10-21T07:28:00.000Z</LastModified></CopyObjectResult>",
+        ),
+        (
+            "/s3/get_object_tagging",
+            r#"{"bucket":"b","key":"k"}"#,
+            200,
+            "x-amz-version-id: v1\r\n",
+            "<Tagging><TagSet><Tag><Key>a</Key><Value>1</Value></Tag><Tag><Key>b</Key><Value>2</Value></Tag></TagSet></Tagging>",
+        ),
+        (
+            "/s3/put_object_tagging",
+            r#"{"bucket":"b","key":"k","tags":[{"key":"a","value":"1"}]}"#,
+            200,
+            "x-amz-version-id: v1\r\n",
+            "",
+        ),
+        (
+            "/s3/delete_object_tagging",
+            r#"{"bucket":"b","key":"k"}"#,
+            204,
+            "x-amz-version-id: v1\r\n",
+            "",
+        ),
+        (
+            "/s3/create_multipart_upload",
+            r#"{"bucket":"b","key":"k","content_type":"video/mp4"}"#,
+            200,
+            "",
+            "<InitiateMultipartUploadResult><Bucket>b</Bucket><Key>k</Key><UploadId>u1</UploadId></InitiateMultipartUploadResult>",
+        ),
+        (
+            "/s3/upload_part_base64",
+            r#"{"bucket":"b","key":"k","upload_id":"u1","part_number":1,"part_data_base64":"aGk="}"#,
+            200,
+            "ETag: \"p1\"\r\n",
+            "",
+        ),
+        (
+            "/s3/complete_multipart_upload",
+            r#"{"bucket":"b","key":"k","upload_id":"u1","parts":[{"part_number":1,"e_tag":"\"p1\""}]}"#,
+            200,
+            "x-amz-version-id: v1\r\n",
+            "<CompleteMultipartUploadResult><Location>http://s3/b/k</Location><Bucket>b</Bucket><Key>k</Key><ETag>\"final\"</ETag></CompleteMultipartUploadResult>",
+        ),
+        (
+            "/s3/abort_multipart_upload",
+            r#"{"bucket":"b","key":"k","upload_id":"u1"}"#,
+            204,
+            "",
+            "",
+        ),
+        (
+            "/s3/list_parts",
+            r#"{"bucket":"b","key":"k","upload_id":"u1","max_parts":10}"#,
+            200,
+            "",
+            "<ListPartsResult><Bucket>b</Bucket><Key>k</Key><UploadId>u1</UploadId><PartNumberMarker>0</PartNumberMarker><NextPartNumberMarker>1</NextPartNumberMarker><MaxParts>10</MaxParts><IsTruncated>false</IsTruncated><StorageClass>STANDARD</StorageClass><Part><PartNumber>1</PartNumber><LastModified>2026-10-21T07:28:00.000Z</LastModified><ETag>\"p1\"</ETag><Size>2</Size></Part></ListPartsResult>",
+        ),
+        (
+            "/s3/list_multipart_uploads",
+            r#"{"bucket":"b","prefix":"p/"}"#,
+            200,
+            "",
+            "<ListMultipartUploadsResult><Bucket>b</Bucket><KeyMarker></KeyMarker><UploadIdMarker></UploadIdMarker><NextKeyMarker>p/k</NextKeyMarker><NextUploadIdMarker>u1</NextUploadIdMarker><Prefix>p/</Prefix><MaxUploads>1000</MaxUploads><IsTruncated>false</IsTruncated><Upload><Key>p/k</Key><UploadId>u1</UploadId><Initiated>2026-10-21T07:28:00.000Z</Initiated><StorageClass>STANDARD</StorageClass></Upload><CommonPrefixes><Prefix>p/x/</Prefix></CommonPrefixes></ListMultipartUploadsResult>",
+        ),
+        (
+            "/s3/list_buckets",
+            "{}",
+            200,
+            "",
+            "<ListAllMyBucketsResult><Buckets><Bucket><Name>b</Name><CreationDate>2026-10-21T07:28:00.000Z</CreationDate></Bucket></Buckets><Owner><ID>o</ID></Owner></ListAllMyBucketsResult>",
+        ),
+        (
+            "/s3/create_bucket",
+            r#"{"bucket":"b"}"#,
+            200,
+            "Location: /b\r\n",
+            "",
+        ),
+        (
+            "/s3/head_bucket",
+            r#"{"bucket":"b"}"#,
+            200,
+            "x-amz-bucket-region: us-east-1\r\n",
+            "",
+        ),
+        ("/s3/delete_bucket", r#"{"bucket":"b"}"#, 204, "", ""),
+        (
+            "/s3/put_object_and_notify",
+            r#"{"bucket":"b","key":"k","file_data_base64":"aGk=","channel":"C1","text":"t"}"#,
+            200,
+            etag,
+            "",
+        ),
+    ];
+    // 上流はポートを持ち続け、接続をすぐ切る。
+    let closing = crate::testing::ClosingUpstream::start().await;
+    let slack = closing.endpoint.clone();
+    let mut out = String::new();
+    for (path, body, status, headers, reply) in cases {
+        let endpoint = canned_upstream(*status, headers, reply).await;
+        let mut state = AppState {
+            database: None,
+            client: crate::http_client::new(),
+            settings: Settings::for_test(&endpoint),
+        };
+        state.settings.slack_api_base_url = slack.clone();
+        let response = post(&state, path, body).await;
+        let text = String::from_utf8_lossy(&response.body)
+            .replace(&endpoint, "<s3>")
+            .replace(&slack, "<slack>");
+        let text = mask_signature(&text);
+        writeln!(out, "{path} {body} => {} {text}", response.status_code).unwrap();
+    }
+    for path in ["/s3/presigned_get_object", "/s3/presigned_put_object"] {
+        let state = AppState {
+            database: None,
+            client: crate::http_client::new(),
+            settings: Settings::for_test("http://s3.test"),
+        };
+        let response = post(
+            &state,
+            path,
+            r#"{"bucket":"b","key":"a b.pdf","expires_in_secs":60}"#,
+        )
+        .await;
+        let text = mask_signature(&String::from_utf8_lossy(&response.body));
+        writeln!(out, "{path} => {} {text}", response.status_code).unwrap();
+    }
+    let mut state = AppState {
+        database: None,
+        client: crate::http_client::new(),
+        settings: Settings::for_test("http://s3.test"),
+    };
+    state.settings.s3_browser_endpoint = Some("https://s3.example".into());
+    let response = post(
+        &state,
+        "/s3/browser_get_object",
+        r#"{"bucket":"pdfs","key":"hitomi/a.pdf"}"#,
+    )
+    .await;
+    let text = mask_signature(&String::from_utf8_lossy(&response.body));
+    writeln!(
+        out,
+        "/s3/browser_get_object => {} cache-control={:?} {text}",
+        response.status_code,
+        response.get_header("cache-control")
+    )
+    .unwrap();
+    drop(closing);
+    assert_golden("s3_success.golden", &out);
+}
+
+/// viewer のリンクは署名済み URL へ転送し、外部 endpoint がなければ 503 を返す。
+#[tokio::test]
+async fn browser_open_redirects_to_the_signed_url() {
+    let mut state = AppState {
+        database: None,
+        client: crate::http_client::new(),
+        settings: Settings::for_test("http://s3.test"),
+    };
+    let uri = "/s3/browser_open?bucket=pdfs&key=hitomi%2Fa.pdf";
+    let response = process_request(Request::new("GET", uri), &state).await;
+    // HTTP 層が汎用の problem details に置き換えるため、Cache-Control は残らない（以前からの挙動）。
+    assert_eq!(response.status_code, 503);
+    assert_eq!(
+        response.get_header("content-type"),
+        Some("application/problem+json")
+    );
+
+    state.settings.s3_browser_endpoint = Some("https://s3.example".into());
+    let response = process_request(Request::new("GET", uri), &state).await;
+    assert_eq!(response.status_code, 307);
+    let location = response.get_header("location").unwrap();
+    assert!(
+        location
+            .starts_with("https://s3.example/pdfs/hitomi/a.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&"),
+        "{location}"
+    );
+    assert!(location.contains("X-Amz-Expires=900"), "{location}");
+    assert_eq!(response.get_header("cache-control"), Some("no-store"));
+    assert_eq!(response.get_header("referrer-policy"), Some("no-referrer"));
+    assert!(response.body.is_empty());
 }

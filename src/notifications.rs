@@ -1,6 +1,6 @@
 use crate::config::state::AppState;
+use crate::reply::{Reply, ReplyExt, reply};
 use nojson::{DisplayJson, JsonFormatter, JsonValueKind, RawJson, RawJsonValue};
-use shiguredo_http11::Response;
 use sqlx::{PgPool, Row};
 use std::collections::BTreeMap;
 mod file;
@@ -132,19 +132,19 @@ impl DisplayJson for Canonical<'_, '_> {
     }
 }
 
-fn response(status: u16, body: impl DisplayJson) -> Response {
-    Response::new(status, crate::errors::api_error::reason_phrase(status))
+fn response(status: u16, body: impl DisplayJson) -> Reply {
+    reply(status)
         .header("Content-Type", "application/json")
         .header("Cache-Control", "no-store")
-        .body(nojson::json(|f| f.value(&body)).to_string().into_bytes())
+        .with_body(nojson::json(|f| f.value(&body)).to_string().into_bytes())
 }
 
 /// 理由を `detail` に入れた problem details。HTTP 層の汎用の problem details に置き換えられない。
-fn error(status: u16, message: &str) -> Response {
+fn error(status: u16, message: &str) -> Reply {
     crate::errors::api_error::problem_details_response(status, message)
 }
 
-fn accepted(id: i64, state: &str) -> Response {
+fn accepted(id: i64, state: &str) -> Reply {
     response(
         202,
         nojson::object(|f| {
@@ -197,7 +197,7 @@ pub async fn enqueue(pool: &PgPool, item: &Notification) -> Result<(i64, String)
     Ok(result)
 }
 
-pub async fn handle_post(state: &AppState, body: &[u8]) -> Response {
+pub async fn handle_post(state: &AppState, body: &[u8]) -> Reply {
     let Some(pool) = &state.database else {
         return error(503, "notification database unavailable");
     };
@@ -215,7 +215,7 @@ pub async fn handle_post(state: &AppState, body: &[u8]) -> Response {
     }
 }
 
-pub async fn handle_get(state: &AppState, id: &str) -> Response {
+pub async fn handle_get(state: &AppState, id: &str) -> Reply {
     let Some(pool) = &state.database else {
         return error(503, "notification database unavailable");
     };
@@ -248,7 +248,7 @@ pub async fn handle_get(state: &AppState, id: &str) -> Response {
 }
 
 /// 外部送信の結果不明は自動再送しない。重複を確認してから明示的に再試行する。
-pub async fn handle_retry(state: &AppState, id: &str) -> Response {
+pub async fn handle_retry(state: &AppState, id: &str) -> Reply {
     let Some(pool) = &state.database else {
         return error(503, "notification database unavailable");
     };

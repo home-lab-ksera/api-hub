@@ -1,5 +1,6 @@
+use crate::reply::{Reply, ReplyExt, reply};
 use futures_util::StreamExt;
-use shiguredo_http11::{Request, Response, uri::percent_decode};
+use shiguredo_http11::uri::percent_decode;
 
 use crate::{
     config::state::AppState,
@@ -39,13 +40,13 @@ fn parse_target(uri: &str) -> Result<(String, String), ApiError> {
 
 pub(crate) async fn upload(
     body: axum::body::Body,
-    request: &Request,
+    uri: &axum::http::Uri,
+    headers: &axum::http::HeaderMap,
     state: &AppState,
-) -> Result<Response, ApiError> {
-    let (bucket, key) = parse_target(&request.uri)?;
-    let content_type = request
-        .get_header("content-type")
-        .unwrap_or("application/octet-stream");
+) -> Result<Reply, ApiError> {
+    let (bucket, key) = parse_target(&uri.to_string())?;
+    let content_type =
+        crate::reply::request_header(headers, "content-type").unwrap_or("application/octet-stream");
     let mut session: Option<StreamingUpload> = None;
     let mut chunks = body.into_data_stream();
     let result = async {
@@ -89,10 +90,11 @@ pub(crate) async fn upload(
             if !part.is_empty() {
                 upload.write_part(&state.client, part).await?;
             }
-            upload.finish(&state.client).await
+            let output = upload.finish(&state.client).await?;
+            Ok((output.e_tag, output.version_id))
         } else {
             // Small and empty objects need no multipart session.
-            s3_service::put_object(
+            let output = s3_service::put_object(
                 &state.client,
                 &state.settings,
                 PutObjectInput {
@@ -102,7 +104,8 @@ pub(crate) async fn upload(
                     content_type: Some(content_type.into()),
                 },
             )
-            .await
+            .await?;
+            Ok((output.e_tag, output.version_id))
         }
     }
     .await;
@@ -112,10 +115,17 @@ pub(crate) async fn upload(
     {
         tracing::warn!(%error, "Failed to abort streaming multipart upload");
     }
-    result.map(|body| {
-        Response::new(200, "OK")
+    // 小さいファイルでも multipart でも、同じ形で返す。
+    result.map(|(e_tag, version_id)| {
+        let body = nojson::json(|f| {
+            f.object(|f| {
+                f.member("e_tag", &e_tag)?;
+                f.member("version_id", &version_id)
+            })
+        });
+        reply(200)
             .header("Content-Type", "application/json")
-            .body(body.into_bytes())
+            .with_body(body.to_string().into_bytes())
     })
 }
 
@@ -123,7 +133,7 @@ pub(crate) async fn upload(
 mod tests {
     use super::*;
     use crate::config::settings::Settings;
-    use shiguredo_http11::RequestDecoder;
+    use shiguredo_http11::{Request, Response};
     use tokio::net::TcpStream;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -150,17 +160,7 @@ mod tests {
             let mut part_tx = Some(part_tx);
             for (status, body) in replies {
                 let (mut socket, _) = s3.accept().await.unwrap();
-                let mut decoder =
-                    RequestDecoder::with_limits(shiguredo_http11::DecoderLimits::unlimited());
-                let mut buffer = [0; 8192];
-                let request = loop {
-                    if let Some(request) = decoder.decode().unwrap() {
-                        break request;
-                    }
-                    let n = socket.read(&mut buffer).await.unwrap();
-                    assert_ne!(n, 0);
-                    decoder.feed(&buffer[..n]).unwrap();
-                };
+                let request = crate::testing::read_request(&mut socket).await.unwrap();
                 let is_part = request.method == "PUT";
                 requests.push(request);
                 let response = Response::new(status, "Mock")

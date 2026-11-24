@@ -1,7 +1,7 @@
-use shiguredo_http11::Response;
+use crate::reply::{Reply, ReplyExt, reply};
 
-pub fn health() -> Response {
-    Response::new(200, "OK")
+pub fn health() -> Reply {
+    reply(200)
         .header("Content-Type", "text/plain; charset=utf-8")
-        .body(b"ok".to_vec())
+        .with_body(b"ok".to_vec())
 }
