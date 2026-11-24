@@ -132,7 +132,6 @@ pub(crate) async fn upload(
 mod tests {
     use super::*;
     use crate::config::settings::Settings;
-    use shiguredo_http11::RequestDecoder;
     use tokio::net::TcpStream;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -159,17 +158,7 @@ mod tests {
             let mut part_tx = Some(part_tx);
             for (status, body) in replies {
                 let (mut socket, _) = s3.accept().await.unwrap();
-                let mut decoder =
-                    RequestDecoder::with_limits(shiguredo_http11::DecoderLimits::unlimited());
-                let mut buffer = [0; 8192];
-                let request = loop {
-                    if let Some(request) = decoder.decode().unwrap() {
-                        break request;
-                    }
-                    let n = socket.read(&mut buffer).await.unwrap();
-                    assert_ne!(n, 0);
-                    decoder.feed(&buffer[..n]).unwrap();
-                };
+                let request = crate::testing::read_request(&mut socket).await.unwrap();
                 let is_part = request.method == "PUT";
                 requests.push(request);
                 let response = Response::new(status, "Mock")

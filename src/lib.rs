@@ -11,3 +11,5 @@ pub mod request_id;
 mod s3_upload;
 pub mod server;
 pub mod service;
+#[doc(hidden)]
+pub mod testing;

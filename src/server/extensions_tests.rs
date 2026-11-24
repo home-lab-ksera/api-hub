@@ -1,8 +1,9 @@
 use super::process_request;
 use crate::config::{settings::Settings, state::AppState};
-use shiguredo_http11::{Request, RequestDecoder, Response};
+use crate::testing::assert_golden;
+use shiguredo_http11::{Request, Response};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     net::TcpListener,
     task::JoinHandle,
     time::{Duration, timeout},
@@ -16,14 +17,7 @@ async fn upstream(replies: Vec<(u16, &'static str)>) -> (AppState, JoinHandle<Ve
             let mut requests = Vec::new();
             for (status, body) in replies {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let mut decoder = RequestDecoder::new();
-                let request = loop {
-                    if let Some(request) = decoder.decode().unwrap() { break request; }
-                    let mut buffer = [0; 4096];
-                    let n = socket.read(&mut buffer).await.unwrap();
-                    assert_ne!(n, 0);
-                    decoder.feed(&buffer[..n]).unwrap();
-                };
+                let request = crate::testing::read_request(&mut socket).await.unwrap();
                 requests.push(request);
                 let response = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 socket.write_all(response.as_bytes()).await.unwrap();
@@ -550,47 +544,13 @@ async fn raw_in_memory(state: &AppState, request: String) -> String {
     String::from_utf8(response).unwrap()
 }
 
-/// 期待値ファイルと比べる。`UPDATE_GOLDEN=1` のときは期待値を書き換える。
-pub(crate) fn assert_golden(name: &str, actual: &str) {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name);
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::write(&path, actual).unwrap();
-        return;
-    }
-    let expected = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("{} is missing; run with UPDATE_GOLDEN=1", path.display()));
-    if expected != actual {
-        let first = expected
-            .lines()
-            .zip(actual.lines())
-            .position(|(e, a)| e != a)
-            .unwrap_or_else(|| expected.lines().count().min(actual.lines().count()));
-        panic!(
-            "{name} differs at line {}:\n  expected: {}\n  actual:   {}\nrun with UPDATE_GOLDEN=1 if the change is intended",
-            first + 1,
-            expected.lines().nth(first).unwrap_or("<end>"),
-            actual.lines().nth(first).unwrap_or("<end>"),
-        );
-    }
-}
-
 /// HTTP の I/F を固定する。経路・メソッド・ヘッダーの組み合わせごとに、
 /// 状態コード・ヘッダー・本文を期待値ファイルと比べる。上流には接続できない状態で実行する。
 #[tokio::test]
 async fn http_interface_matches_golden() {
-    // 上流はポートを持ち続け、接続をすぐ切る。閉じたポートが再利用されて
-    // 別の fixture へ届くことを防ぎ、上流に触れる要求の結果を毎回同じにする。
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", closed.local_addr().unwrap());
-    let refuser = tokio::spawn(async move {
-        loop {
-            if let Ok((socket, _)) = closed.accept().await {
-                drop(socket);
-            }
-        }
-    });
+    // 上流はポートを持ち続け、接続をすぐ切る。
+    let closing = crate::testing::ClosingUpstream::start().await;
+    let endpoint = closing.endpoint.clone();
     let (mut state, _upstream) = upstream(vec![]).await;
     state.settings.s3_endpoint = Some(endpoint.clone());
     state.settings.slack_api_base_url = endpoint;
@@ -695,7 +655,7 @@ async fn http_interface_matches_golden() {
         .buffered(32)
         .collect()
         .await;
-    refuser.abort();
+    drop(closing);
     let out = lines.concat();
     assert_golden("http_interface.golden", &out);
 }
@@ -754,21 +714,14 @@ async fn notification_error_strings_match_golden() {
         )
         .unwrap();
     }
-    // Slack へ接続できない場合。エラー文には URL が入るため、ポートを伏せる。
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", closed.local_addr().unwrap());
-    let refuser = tokio::spawn(async move {
-        loop {
-            if let Ok((socket, _)) = closed.accept().await {
-                drop(socket);
-            }
-        }
-    });
+    // 上流はポートを持ち続け、接続をすぐ切る。
+    let closing = crate::testing::ClosingUpstream::start().await;
+    let endpoint = closing.endpoint.clone();
     let (mut state, task) = upstream(vec![(200, "")]).await;
     state.settings.slack_api_base_url = endpoint.clone();
     let response = post(&state, "/s3/put_object_and_notify", request).await;
     task.await.unwrap();
-    refuser.abort();
+    drop(closing);
     let json = nojson::RawJson::parse(std::str::from_utf8(&response.body).unwrap()).unwrap();
     let error = json
         .value()
@@ -867,16 +820,7 @@ async fn slack_upload_requests_match_golden() {
             let mut requests = Vec::new();
             for (status, body) in replies {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let mut decoder = RequestDecoder::new();
-                let request = loop {
-                    if let Some(request) = decoder.decode().unwrap() {
-                        break request;
-                    }
-                    let mut buffer = [0; 4096];
-                    let n = socket.read(&mut buffer).await.unwrap();
-                    assert_ne!(n, 0);
-                    decoder.feed(&buffer[..n]).unwrap();
-                };
+                let request = crate::testing::read_request(&mut socket).await.unwrap();
                 requests.push(request);
                 let response = format!(
                     "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -929,17 +873,8 @@ async fn canned_upstream(status: u16, headers: &'static str, body: &'static str)
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.unwrap();
-        let mut decoder = RequestDecoder::new();
-        loop {
-            if decoder.decode().unwrap().is_some() {
-                break;
-            }
-            let mut buffer = [0; 8192];
-            let n = socket.read(&mut buffer).await.unwrap();
-            if n == 0 {
-                return;
-            }
-            decoder.feed(&buffer[..n]).unwrap();
+        if crate::testing::read_request(&mut socket).await.is_none() {
+            return;
         }
         let response = format!(
             "HTTP/1.1 {status} OK\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1127,16 +1062,9 @@ async fn s3_success_responses_match_golden() {
             "",
         ),
     ];
-    // Slack はポートを持ったまま接続をすぐ切る。
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let slack = format!("http://{}", closed.local_addr().unwrap());
-    let refuser = tokio::spawn(async move {
-        loop {
-            if let Ok((socket, _)) = closed.accept().await {
-                drop(socket);
-            }
-        }
-    });
+    // 上流はポートを持ち続け、接続をすぐ切る。
+    let closing = crate::testing::ClosingUpstream::start().await;
+    let slack = closing.endpoint.clone();
     let mut out = String::new();
     for (path, body, status, headers, reply) in cases {
         let endpoint = canned_upstream(*status, headers, reply).await;
@@ -1188,7 +1116,7 @@ async fn s3_success_responses_match_golden() {
         response.get_header("cache-control")
     )
     .unwrap();
-    refuser.abort();
+    drop(closing);
     assert_golden("s3_success.golden", &out);
 }
 

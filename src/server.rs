@@ -33,7 +33,6 @@ mod tests {
     #[tokio::test]
     async fn preview_streams_range_before_upstream_finishes_and_reuses_connection() {
         use crate::config::{settings::Settings, state::AppState};
-        use shiguredo_http11::RequestDecoder;
         use tokio::{
             io::{AsyncReadExt, AsyncWriteExt},
             net::{TcpListener, TcpStream},
@@ -49,16 +48,10 @@ mod tests {
             let expected = payload.clone();
             let upstream_task = tokio::spawn(async move {
                 let (mut socket, _) = upstream.accept().await.unwrap();
-                let mut decoder = RequestDecoder::new();
+                let mut reader = crate::testing::RequestReader::new();
                 let mut wait = Some(wait);
                 for index in 0..2 {
-                    let request = loop {
-                        if let Some(request) = decoder.decode().unwrap() { break request; }
-                        let mut buffer = [0; 4096];
-                        let n = socket.read(&mut buffer).await.unwrap();
-                        assert_ne!(n, 0);
-                        decoder.feed(&buffer[..n]).unwrap();
-                    };
+                    let request = reader.next(&mut socket).await.unwrap();
                     if index == 0 {
                         assert_eq!(request.get_header("range"), Some("bytes=0-262143"));
                         let head = format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 0-262143/524288\r\nETag: \"test\"\r\n\r\n", payload.len());
