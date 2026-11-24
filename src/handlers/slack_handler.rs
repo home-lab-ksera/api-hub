@@ -309,25 +309,30 @@ pub async fn upload_pdf_raw(
 mod tests {
     use super::ensure_image_content;
 
+    /// 形式ごとに、正しい先頭バイトは受け付け、違えば形式名入りのエラーにする。
     #[test]
-    fn image_content_errors_name_the_format() {
-        let png = b"\x89PNG\r\n\x1a\nimage";
-        assert_eq!(ensure_image_content("image/png", png).unwrap(), "png");
-        for (media_type, label) in [
-            ("image/png", "PNG"),
-            ("image/jpeg", "JPEG"),
-            ("image/gif", "GIF"),
-            ("image/webp", "WEBP"),
+    fn image_content_matches_type_and_signature() {
+        for (media_type, valid, extension, label) in [
+            (
+                "image/png",
+                b"\x89PNG\r\n\x1a\nrest".as_slice(),
+                "png",
+                "PNG",
+            ),
+            ("image/jpeg", b"\xff\xd8\xff\xe0", "jpg", "JPEG"),
+            ("image/gif", b"GIF89a", "gif", "GIF"),
+            ("image/webp", b"RIFF\0\0\0\0WEBPVP8 ", "webp", "WEBP"),
         ] {
+            assert_eq!(ensure_image_content(media_type, valid).unwrap(), extension);
             assert_eq!(
-                ensure_image_content(media_type, b"x")
+                ensure_image_content(media_type, b"GIF87")
                     .unwrap_err()
                     .to_string(),
                 format!("Bad Request: Body is not a valid {label} image")
             );
         }
         assert_eq!(
-            ensure_image_content("image/svg+xml", png)
+            ensure_image_content("image/svg+xml", b"<svg/>")
                 .unwrap_err()
                 .to_string(),
             "Bad Request: Unsupported image Content-Type. Use image/png, image/jpeg, image/gif, or image/webp"

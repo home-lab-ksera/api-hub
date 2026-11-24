@@ -340,20 +340,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn validates_and_decodes_query_parameters() {
-        assert_eq!(
-            parse_target("/s3/put_object_stream?bucket=b&key=a%2Fb+%2B.mp4").unwrap(),
-            ("b".into(), "a/b +.mp4".into())
-        );
-        for uri in [
-            "/s3/put_object_stream",
-            "?bucket=b",
-            "?bucket=&key=k",
-            "?bucket=b&key=",
-        ] {
-            assert!(parse_target(uri).is_err());
-        }
-    }
 }

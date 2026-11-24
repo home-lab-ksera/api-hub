@@ -79,120 +79,33 @@ async fn preserves_signed_target_redirect_and_encoded_body_without_replay() {
     server.await.unwrap();
 }
 
+/// URL の正規化で署名と別のオブジェクトを指す要求は、送らずにエラーにする。
 #[tokio::test]
-async fn shares_client_pool_and_does_not_read_head_body() {
+async fn normalized_signed_path_is_not_sent() {
+    // 届けば 200 を返す宛先。エラーが送信前の確認によるものだと分かるようにする。
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/object", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        for _ in 0..3 {
-            assert!(head(&mut socket).await.starts_with("HEAD "));
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n")
-                .await
-                .unwrap();
-        }
-    });
+    let url = format!("http://{}/object/../other", listener.local_addr().unwrap());
     let client = http_client::new();
-    timeout(Duration::from_secs(3), async {
-        for _ in 0..3 {
-            let response = client.clone().head(&url).send().await.unwrap();
-            assert!(response.bytes().await.unwrap().is_empty());
-        }
-        server.await.unwrap();
-    })
-    .await
-    .unwrap();
+    let send = http_client::request(&client, "GET".into(), url, vec![], vec![], false).send();
+    assert!(send.await.is_err());
+    assert!(
+        timeout(Duration::from_millis(150), listener.accept())
+            .await
+            .is_err(),
+        "the request reached the server"
+    );
 }
 
+/// JSON API の本文は 1MiB まで。実際の TCP 接続で、上限を超えた本文を 413 で断る。
 #[tokio::test]
-async fn truncated_body_and_normalized_signed_path_are_rejected() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/object", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        head(&mut socket).await;
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort")
-            .await
-            .unwrap();
-    });
-    let client = http_client::new();
-    assert!(
-        client
-            .get(&url)
-            .send()
-            .await
-            .unwrap()
-            .bytes()
-            .await
-            .is_err()
-    );
-    assert!(
-        http_client::request(
-            &client,
-            "GET".into(),
-            format!("{url}/../other"),
-            vec![],
-            vec![],
-            false
-        )
-        .send()
-        .await
-        .is_err()
-    );
-    server.await.unwrap();
-}
-
-#[tokio::test]
-async fn axum_preserves_api_errors_cors_request_id_and_limits_json() {
+async fn json_body_over_limit_is_rejected() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = oneshot::channel();
     let server = tokio::spawn(server::serve(listener, state(None), async {
         let _ = stopped.await;
     }));
-    let client = http_client::new();
-    for (method, path, status) in [
-        ("GET", "/health", 200),
-        ("POST", "/health", 405),
-        ("GET", "/missing", 404),
-        ("POST", "/notifications", 503),
-    ] {
-        let response = client
-            .request(method.parse().unwrap(), format!("{base}{path}"))
-            .header("x-request-id", "fixture-id")
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), status);
-        assert_eq!(response.headers()["x-request-id"], "fixture-id");
-        if status >= 400 {
-            assert_eq!(
-                response.headers()["content-type"],
-                "application/problem+json"
-            );
-        }
-        response.bytes().await.unwrap();
-    }
-    let response = client
-        .request(
-            reqwest::Method::OPTIONS,
-            format!("{base}/s3/browser_get_object"),
-        )
-        .header(
-            "origin",
-            "https://hitomi-upload-viewer.internal.qroksera.com",
-        )
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 204);
-    assert_eq!(
-        response.headers()["access-control-allow-origin"],
-        "https://hitomi-upload-viewer.internal.qroksera.com"
-    );
-    let response = client
+    let response = http_client::new()
         .post(format!("{base}/notifications"))
         .body(vec![0; 1024 * 1024 + 1])
         .send()

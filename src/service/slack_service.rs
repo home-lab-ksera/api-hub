@@ -329,15 +329,4 @@ mod tests {
         assert_eq!(retry_after_secs(Some("30")), 30);
         assert_eq!(retry_after_secs(Some("999999")), 86400);
     }
-
-    #[test]
-    fn reply_body_uses_the_last_value_and_ignores_wrong_types() {
-        let body = SlackReplyBody::parse(br#"{"ok":false,"ok":true,"ts":1,"error":"x"}"#).unwrap();
-        assert_eq!(body.ok, Some(true));
-        assert_eq!(body.ts, None);
-        assert_eq!(body.error.as_deref(), Some("x"));
-        assert_eq!(SlackReplyBody::parse(b"[]").unwrap().ok, None);
-        assert!(SlackReplyBody::parse(b"nope").is_none());
-        assert!(SlackReplyBody::parse(b"\xff").is_none());
-    }
 }

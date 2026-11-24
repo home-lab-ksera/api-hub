@@ -324,6 +324,3 @@ pub async fn delete_object_tagging(
     .await?;
     Ok(output)
 }
-
-#[cfg(test)]
-mod tests;

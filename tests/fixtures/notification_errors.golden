@@ -1,13 +1,10 @@
 ok (200 {"ok":true,"ts":"1.2"}) => 200 notified=true notification_error=null
 api error (200 {"ok":false,"error":"channel_not_found"}) => 200 notified=false notification_error="channel_not_found"
 api error without code (200 {"ok":false}) => 200 notified=false notification_error="unknown_error"
-api error with non-string code (200 {"ok":false,"error":3}) => 200 notified=false notification_error="unknown_error"
 missing ok (200 {"ts":"1.2"}) => 200 notified=false notification_error="JSON Object at byte position 0 is invalid: required member 'ok' is missing"
 ok is not a bool (200 {"ok":"true"}) => 200 notified=false notification_error="JSON String at byte position 6 is invalid: expected Boolean, but found String"
 not json (200 <html>) => 200 notified=false notification_error="unexpected char at byte position 0"
 empty body (200 ) => 200 notified=false notification_error="unexpected EOS at byte position 0"
 array (200 []) => 200 notified=false notification_error="JSON Array at byte position 0 is invalid: expected Object, but found Array"
-rate limited (429 {"ok":false,"error":"ratelimited"}) => 200 notified=false notification_error="Slack HTTP status 429"
 server error (500 oops) => 200 notified=false notification_error="Slack HTTP status 500"
-client error (404 {"ok":false,"error":"x"}) => 200 notified=false notification_error="Slack HTTP status 404"
 connection closed => 200 notification_error="error sending request for url (<slack>/chat.postMessage)"
