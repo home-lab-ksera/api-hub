@@ -132,13 +132,15 @@ async fn durable_notifications() {
     assert_eq!(
         notifications::handle_retry(&state, &expired.to_string())
             .await
-            .status_code,
+            .status()
+            .as_u16(),
         202
     );
     assert_eq!(
         notifications::handle_retry(&state, &id.to_string())
             .await
-            .status_code,
+            .status()
+            .as_u16(),
         409
     );
     sqlx::query("UPDATE notifications SET state='uncertain' WHERE id=$1")
@@ -210,7 +212,10 @@ async fn durable_notifications() {
     shutdown_drains_one_delivery(&pool, &state).await;
     pool.close().await;
     assert_eq!(
-        api_hub::queue_metrics::handle(&state).await.status_code,
+        api_hub::queue_metrics::handle(&state)
+            .await
+            .status()
+            .as_u16(),
         503
     );
     sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
@@ -333,7 +338,10 @@ async fn shutdown_drains_one_delivery(pool: &sqlx::PgPool, state: &AppState) {
         .unwrap();
     assert!(last > 0.0);
     assert_eq!(
-        api_hub::queue_metrics::handle(&state).await.status_code,
+        api_hub::queue_metrics::handle(&state)
+            .await
+            .status()
+            .as_u16(),
         200
     );
 }

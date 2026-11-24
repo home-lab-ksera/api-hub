@@ -4,7 +4,9 @@ use super::routes::{self, Endpoint, Lookup};
 use crate::config::state::AppState;
 use crate::errors::api_error::ApiError;
 use crate::handlers::{health_handler, openapi_handler, s3_handler, slack_handler};
-use shiguredo_http11::{Request, Response, uri::percent_decode};
+use crate::reply::{Reply, ReplyExt, reply};
+use axum::http::HeaderMap;
+use shiguredo_http11::uri::percent_decode;
 
 /// `/s3/preview/` に続く `{bucket}/{key}` を復号する。
 pub(super) fn parse_preview_bucket_and_key(remaining: &str) -> Result<(String, String), ApiError> {
@@ -23,24 +25,23 @@ pub(super) fn parse_preview_bucket_and_key(remaining: &str) -> Result<(String, S
 }
 
 pub(super) async fn route_request(
-    request: &Request,
     app_state: &AppState,
+    method: &str,
+    headers: &HeaderMap,
+    body: &[u8],
     path: &str,
     query: Option<&str>,
-) -> Result<Response, ApiError> {
-    let (route, param) = match routes::lookup(&request.method, path) {
+) -> Result<Reply, ApiError> {
+    let (route, param) = match routes::lookup(method, path) {
         Lookup::Found(route, param) => (route, param),
         Lookup::Preflight => return Ok(s3_handler::s3_preflight()),
         Lookup::MethodNotAllowed => {
             return Err(ApiError::MethodNotAllowed(format!(
-                "Method {} is not allowed for {}",
-                request.method, path
+                "Method {method} is not allowed for {path}"
             )));
         }
         Lookup::NotFound => return Err(ApiError::NotFound(format!("Route not found: {path}"))),
     };
-    let body = request.body.as_slice();
-    let headers = request.headers.as_slice();
     use Endpoint as E;
     match route.endpoint {
         E::Health => Ok(health_handler::health()),
@@ -84,14 +85,13 @@ pub(super) async fn route_request(
         E::S3DeleteBucket => s3_handler::delete_bucket(app_state, body).await,
         // 本文を流す経路は handle_http が先に処理する。ここへ来るのはその経路を通らない呼び出しだけ。
         E::S3PutObjectStream | E::S3Preview => Err(ApiError::MethodNotAllowed(format!(
-            "Method {} is not allowed for {}",
-            request.method, path
+            "Method {method} is not allowed for {path}"
         ))),
     }
 }
 
 /// viewer がリンクから開けるよう、署名済み URL へ転送する。
-async fn browser_open(app_state: &AppState, query: Option<&str>) -> Result<Response, ApiError> {
+async fn browser_open(app_state: &AppState, query: Option<&str>) -> Result<Reply, ApiError> {
     // 同じ名前が複数あるときは後の値を使う。
     let fields: std::collections::BTreeMap<String, String> =
         url::form_urlencoded::parse(query.unwrap_or("").as_bytes())
@@ -101,7 +101,7 @@ async fn browser_open(app_state: &AppState, query: Option<&str>) -> Result<Respo
     let Some(signed) = s3_handler::browser_presign(app_state, body.as_bytes())? else {
         return Ok(s3_handler::browser_unavailable());
     };
-    Ok(Response::new(307, "Temporary Redirect")
+    Ok(reply(307)
         .header("Location", &signed.url)
         .header("Cache-Control", "no-store")
         .header("Referrer-Policy", "no-referrer"))

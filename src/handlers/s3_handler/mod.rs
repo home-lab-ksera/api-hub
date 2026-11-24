@@ -1,4 +1,4 @@
-use shiguredo_http11::Response;
+use crate::reply::{Reply, ReplyExt, reply};
 
 use crate::{
     config::state::AppState,
@@ -23,49 +23,49 @@ pub use multipart::*;
 pub use preview::*;
 pub(in crate::handlers) use requests::*;
 
-pub(super) fn json_response(body: String) -> Response {
-    Response::new(200, "OK")
+pub(super) fn json_response(body: String) -> Reply {
+    reply(200)
         .header("Content-Type", "application/json")
-        .body(body.into_bytes())
+        .with_body(body.into_bytes())
 }
 
-pub async fn put_object_base64(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn put_object_base64(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let input = parse_body(body, put_object_base64_input)?;
     let output = s3_service::put_object(&app_state.client, &app_state.settings, input).await?;
     Ok(json_response(output::put_object(&output).to_string()))
 }
 
-pub async fn get_object_base64(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn get_object_base64(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let input = parse_body(body, get_object_input)?;
     let output = s3_service::get_object(&app_state.client, &app_state.settings, input).await?;
     Ok(json_response(output::get_object(&output).to_string()))
 }
 
-pub async fn head_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn head_object(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let input = parse_body(body, head_object_input)?;
     let output = s3_service::head_object(&app_state.client, &app_state.settings, input).await?;
     Ok(json_response(output::head_object(&output).to_string()))
 }
 
-pub async fn delete_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn delete_object(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let input = parse_body(body, delete_object_input)?;
     let output = s3_service::delete_object(&app_state.client, &app_state.settings, input).await?;
     Ok(json_response(output::delete_object(&output).to_string()))
 }
 
-pub async fn delete_objects(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn delete_objects(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let input = parse_body(body, delete_objects_input)?;
     let output = s3_service::delete_objects(&app_state.client, &app_state.settings, input).await?;
     Ok(json_response(output::delete_objects(&output).to_string()))
 }
 
-pub async fn list_objects_v2(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn list_objects_v2(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let input = parse_body(body, list_objects_v2_input)?;
     let output = s3_service::list_objects_v2(&app_state.client, &app_state.settings, input).await?;
     Ok(json_response(output::list_objects_v2(&output).to_string()))
 }
 
-pub async fn presigned_get_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn presigned_get_object(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let input = parse_body(body, presigned_object_input)?;
     let output = s3_service::presigned_get(&app_state.settings, input)?;
     Ok(json_response(output::presigned(&output).to_string()))
@@ -109,7 +109,7 @@ mod camera_viewer_tests {
 }
 
 /// 内部viewer専用。通常のS3 APIとは別に、公開する保存領域と署名期限を固定する。
-pub async fn browser_get_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn browser_get_object(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     match browser_presign(app_state, body)? {
         Some(output) => Ok(json_response(output::presigned(&output).to_string())
             .header("Cache-Control", "no-store")),
@@ -118,8 +118,8 @@ pub async fn browser_get_object(app_state: &AppState, body: &[u8]) -> Result<Res
 }
 
 /// viewer 向けの外部 endpoint が設定されていないときの応答。
-pub fn browser_unavailable() -> Response {
-    Response::new(503, "Service Unavailable").header("Cache-Control", "no-store")
+pub fn browser_unavailable() -> Reply {
+    reply(503).header("Cache-Control", "no-store")
 }
 
 /// viewer が開いてよいオブジェクトなら、外部 endpoint で署名した GET を返す。
@@ -175,23 +175,23 @@ pub fn browser_presign(
     .map(Some)
 }
 
-pub async fn presigned_put_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn presigned_put_object(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let input = parse_body(body, presigned_object_input)?;
     let output = s3_service::presigned_put(&app_state.settings, input)?;
     Ok(json_response(output::presigned(&output).to_string()))
 }
 
-pub fn s3_preflight() -> Response {
-    Response::new(204, "No Content")
+pub fn s3_preflight() -> Reply {
+    reply(204)
 }
 
-pub async fn copy_object(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn copy_object(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let input = parse_body(body, copy_object_input)?;
     let output = s3_service::copy_object(&app_state.client, &app_state.settings, input).await?;
     Ok(json_response(output::copy_object(&output).to_string()))
 }
 
-pub async fn get_object_tagging(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn get_object_tagging(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let input = parse_body(body, object_tagging_input)?;
     let output =
         s3_service::get_object_tagging(&app_state.client, &app_state.settings, input).await?;
@@ -200,7 +200,7 @@ pub async fn get_object_tagging(app_state: &AppState, body: &[u8]) -> Result<Res
     ))
 }
 
-pub async fn put_object_tagging(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn put_object_tagging(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let (input, tags) = parse_body(body, |root| {
         Ok((object_tagging_input(root)?, parse_tags(root)?))
     })?;
@@ -211,10 +211,7 @@ pub async fn put_object_tagging(app_state: &AppState, body: &[u8]) -> Result<Res
     ))
 }
 
-pub async fn delete_object_tagging(
-    app_state: &AppState,
-    body: &[u8],
-) -> Result<Response, ApiError> {
+pub async fn delete_object_tagging(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     let input = parse_body(body, object_tagging_input)?;
     let output =
         s3_service::delete_object_tagging(&app_state.client, &app_state.settings, input).await?;
@@ -225,10 +222,7 @@ pub async fn delete_object_tagging(
 
 /// A successful upload is not rolled back when notification fails. The caller
 /// can retry just /slack/message using the returned URL.
-pub async fn put_object_and_notify(
-    app_state: &AppState,
-    body: &[u8],
-) -> Result<Response, ApiError> {
+pub async fn put_object_and_notify(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     struct Notify {
         bucket: String,
         key: String,

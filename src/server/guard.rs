@@ -2,7 +2,8 @@
 
 use super::routes;
 use crate::errors::api_error::ApiError;
-use shiguredo_http11::{Request, Response};
+use crate::reply::{Reply, append_header, request_header};
+use axum::http::HeaderMap;
 
 const S3_CORS_ALLOWED_ORIGIN: &str = "https://hitomi-upload-viewer.internal.qroksera.com";
 
@@ -14,16 +15,15 @@ const S3_CORS_ALLOWED_ORIGIN: &str = "https://hitomi-upload-viewer.internal.qrok
 pub(super) fn check_request_source(
     method: &axum::http::Method,
     path: &str,
-    request: &Request,
+    headers: &HeaderMap,
 ) -> Result<(), ApiError> {
     use axum::http::Method;
     if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
         return Ok(());
     }
-    let origin = request.get_header("origin");
+    let origin = request_header(headers, "origin");
     let from_browser = origin.is_some()
-        || request
-            .get_header("sec-fetch-site")
+        || request_header(headers, "sec-fetch-site")
             .is_some_and(|site| !site.eq_ignore_ascii_case("none"));
     if !from_browser {
         return Ok(());
@@ -38,11 +38,15 @@ pub(super) fn check_request_source(
 
 /// 本文がない、または `application/json` の要求か。
 /// `text/plain` などの preflight 不要な形式で JSON を送り込む経路を閉じる。
-pub(super) fn is_json_request(method: &axum::http::Method, body: &[u8], request: &Request) -> bool {
+pub(super) fn is_json_request(
+    method: &axum::http::Method,
+    body: &[u8],
+    headers: &HeaderMap,
+) -> bool {
     if *method != axum::http::Method::POST || body.is_empty() {
         return true;
     }
-    request.get_header("content-type").is_some_and(|value| {
+    request_header(headers, "content-type").is_some_and(|value| {
         value
             .split(';')
             .next()
@@ -50,14 +54,26 @@ pub(super) fn is_json_request(method: &axum::http::Method, body: &[u8], request:
     })
 }
 
-pub(super) fn apply_s3_cors(path: &str, response: &mut Response) {
+pub(super) fn apply_s3_cors(path: &str, response: &mut Reply) {
     if !path.starts_with("/s3/") {
         return;
     }
     // 許可するオリジンは viewer の1つだけなので、要求の Origin によらず同じ値を返す。
-    response.add_header("Access-Control-Allow-Origin", S3_CORS_ALLOWED_ORIGIN);
-    response.add_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    response.add_header("Access-Control-Allow-Headers", "content-type, x-request-id");
-    response.add_header("Access-Control-Max-Age", "600");
-    response.add_header("Vary", "Origin");
+    append_header(
+        response,
+        "Access-Control-Allow-Origin",
+        S3_CORS_ALLOWED_ORIGIN,
+    );
+    append_header(
+        response,
+        "Access-Control-Allow-Methods",
+        "GET, POST, OPTIONS",
+    );
+    append_header(
+        response,
+        "Access-Control-Allow-Headers",
+        "content-type, x-request-id",
+    );
+    append_header(response, "Access-Control-Max-Age", "600");
+    append_header(response, "Vary", "Origin");
 }

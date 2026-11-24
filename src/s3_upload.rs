@@ -1,5 +1,6 @@
+use crate::reply::{Reply, ReplyExt, reply};
 use futures_util::StreamExt;
-use shiguredo_http11::{Request, Response, uri::percent_decode};
+use shiguredo_http11::uri::percent_decode;
 
 use crate::{
     config::state::AppState,
@@ -39,13 +40,13 @@ fn parse_target(uri: &str) -> Result<(String, String), ApiError> {
 
 pub(crate) async fn upload(
     body: axum::body::Body,
-    request: &Request,
+    uri: &axum::http::Uri,
+    headers: &axum::http::HeaderMap,
     state: &AppState,
-) -> Result<Response, ApiError> {
-    let (bucket, key) = parse_target(&request.uri)?;
-    let content_type = request
-        .get_header("content-type")
-        .unwrap_or("application/octet-stream");
+) -> Result<Reply, ApiError> {
+    let (bucket, key) = parse_target(&uri.to_string())?;
+    let content_type =
+        crate::reply::request_header(headers, "content-type").unwrap_or("application/octet-stream");
     let mut session: Option<StreamingUpload> = None;
     let mut chunks = body.into_data_stream();
     let result = async {
@@ -122,9 +123,9 @@ pub(crate) async fn upload(
                 f.member("version_id", &version_id)
             })
         });
-        Response::new(200, "OK")
+        reply(200)
             .header("Content-Type", "application/json")
-            .body(body.to_string().into_bytes())
+            .with_body(body.to_string().into_bytes())
     })
 }
 
@@ -132,6 +133,7 @@ pub(crate) async fn upload(
 mod tests {
     use super::*;
     use crate::config::settings::Settings;
+    use shiguredo_http11::{Request, Response};
     use tokio::net::TcpStream;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},

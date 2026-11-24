@@ -1,4 +1,4 @@
-use shiguredo_http11::Response;
+use crate::reply::{Reply, ReplyExt, reply};
 use tracing::{error, warn};
 
 #[derive(Debug)]
@@ -38,10 +38,10 @@ fn problem_details_json(status_code: u16, detail: impl Into<String>) -> String {
     .to_string()
 }
 
-pub fn problem_details_response(status_code: u16, detail: impl Into<String>) -> Response {
-    Response::new(status_code, reason_phrase(status_code))
+pub fn problem_details_response(status_code: u16, detail: impl Into<String>) -> Reply {
+    reply(status_code)
         .header("Content-Type", "application/problem+json")
-        .body(problem_details_json(status_code, detail).into_bytes())
+        .with_body(problem_details_json(status_code, detail).into_bytes())
 }
 
 impl ApiError {
@@ -67,7 +67,7 @@ impl ApiError {
 
     /// 利用者の誤りは warn、サーバーの障害は error で記録する。
     /// 内部エラーの詳細はログにだけ残し、応答には含めない。
-    pub fn into_response(self) -> Response {
+    pub fn into_response(self) -> Reply {
         let status = self.status_code();
         let error_type = self.error_type();
         match self {

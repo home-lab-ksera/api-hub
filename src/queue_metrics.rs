@@ -1,4 +1,5 @@
 //! DBの業務状態を集計する。内容・保存キー・通知先はラベルへ含めない。
+use crate::reply::{Reply, ReplyExt, reply};
 use sqlx::{PgPool, Row};
 use std::fmt::Write;
 use std::time::Duration;
@@ -26,19 +27,19 @@ pub async fn render(pool: &PgPool) -> Result<String, sqlx::Error> {
     Ok(text)
 }
 
-pub async fn handle(state: &crate::config::state::AppState) -> shiguredo_http11::Response {
+pub async fn handle(state: &crate::config::state::AppState) -> Reply {
     let result = match &state.database {
         Some(pool) => render(pool).await,
         None => Err(sqlx::Error::PoolClosed),
     };
     match result {
-        Ok(body) => shiguredo_http11::Response::new(200, "OK")
+        Ok(body) => reply(200)
             .header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
             .header("Cache-Control", "no-store")
-            .body(body.into_bytes()),
+            .with_body(body.into_bytes()),
         Err(error) => {
             tracing::error!(%error, "Queue metrics unavailable");
-            shiguredo_http11::Response::new(503, "Service Unavailable")
+            reply(503)
         }
     }
 }

@@ -1,4 +1,4 @@
-use shiguredo_http11::Response;
+use crate::reply::{Reply, ReplyExt, reply};
 use shiguredo_http11::uri::percent_decode;
 use std::time::Instant;
 use tracing::{debug, error, info, instrument, warn};
@@ -103,8 +103,8 @@ fn decode_query_component(value: &str) -> Result<String, ApiError> {
     percent_decode(&replaced).map_err(|_| ApiError::BadRequest("Invalid query string".to_string()))
 }
 
-fn content_type(headers: &[(String, String)]) -> Result<String, ApiError> {
-    let content_type = crate::http_client::find_header(headers, "content-type")
+fn content_type(headers: &axum::http::HeaderMap) -> Result<String, ApiError> {
+    let content_type = crate::reply::request_header(headers, "content-type")
         .ok_or_else(|| ApiError::BadRequest("Missing Content-Type header".to_string()))?
         .trim();
 
@@ -186,23 +186,23 @@ fn validate_file_not_empty(file_data: &[u8]) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn json_string_response(value: String) -> Response {
+fn json_string_response(value: String) -> Reply {
     let body = nojson::json(|f| f.value(&value)).to_string();
-    Response::new(200, "OK")
+    reply(200)
         .header("Content-Type", "application/json")
-        .body(body.into_bytes())
+        .with_body(body.into_bytes())
 }
 
-pub async fn post_message(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn post_message(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     message(app_state, body, false).await
 }
 
-pub async fn update_message(app_state: &AppState, body: &[u8]) -> Result<Response, ApiError> {
+pub async fn update_message(app_state: &AppState, body: &[u8]) -> Result<Reply, ApiError> {
     message(app_state, body, true).await
 }
 
 #[instrument(skip(app_state, body))]
-async fn message(app_state: &AppState, body: &[u8], update: bool) -> Result<Response, ApiError> {
+async fn message(app_state: &AppState, body: &[u8], update: bool) -> Result<Reply, ApiError> {
     let body = std::str::from_utf8(body)
         .map_err(|_| ApiError::BadRequest("Request body must be valid UTF-8".into()))?;
     let payload = message_payload(body, update)?;
@@ -220,7 +220,7 @@ async fn share_file(
     file_name: &str,
     body: &[u8],
     kind: &str,
-) -> Result<Response, ApiError> {
+) -> Result<Reply, ApiError> {
     let start = Instant::now();
     let response_text = slack_service::send_single_file_to_slack(
         &slack_service::SlackClient::new(&app_state.client, &app_state.settings),
@@ -252,9 +252,9 @@ async fn share_file(
 pub async fn upload_image_raw(
     app_state: &AppState,
     raw_query: Option<&str>,
-    headers: &[(String, String)],
+    headers: &axum::http::HeaderMap,
     body: &[u8],
-) -> Result<Response, ApiError> {
+) -> Result<Reply, ApiError> {
     let payload = parse_upload_query(raw_query)?;
     let content_type = content_type(headers)?;
     validate_file_not_empty(body)?;
@@ -276,9 +276,9 @@ pub async fn upload_image_raw(
 pub async fn upload_pdf_raw(
     app_state: &AppState,
     raw_query: Option<&str>,
-    headers: &[(String, String)],
+    headers: &axum::http::HeaderMap,
     body: &[u8],
-) -> Result<Response, ApiError> {
+) -> Result<Reply, ApiError> {
     let payload = parse_upload_query(raw_query)?;
     let content_type = content_type(headers)?;
     validate_file_not_empty(body)?;

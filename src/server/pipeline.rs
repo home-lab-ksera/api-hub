@@ -6,46 +6,31 @@ use super::routes::{self, Body, Endpoint, Lookup};
 use crate::config::state::AppState;
 use crate::errors::api_error::{ApiError, problem_details_response, reason_phrase};
 use crate::handlers::s3_handler;
+use crate::reply::{Reply, ReplyExt, append_header, reply, request_header};
 use crate::request_id;
 use axum::body::Body as AxumBody;
-use shiguredo_http11::{Request, Response};
+use axum::http::request::Parts;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
 pub(super) async fn handle_http(
     axum::extract::State(state): axum::extract::State<AppState>,
     request: axum::extract::Request,
 ) -> axum::response::Response {
-    use axum::http::{HeaderName, HeaderValue, StatusCode};
     let (parts, body) = request.into_parts();
-    let mut metadata = Request::new(parts.method.as_str(), &parts.uri.to_string());
-    for (name, value) in &parts.headers {
-        if let Ok(value) = value.to_str() {
-            metadata.add_header(name.as_str(), value);
-        }
-    }
-    let context = RequestContext::new(&metadata, parts.uri.path(), parts.uri.query());
-    let span = context.span(&metadata);
+    let context = RequestContext::new(&parts);
+    let span = context.span(&parts);
     async move {
         context.log_incoming();
         let start = std::time::Instant::now();
-        let (mut head, stream) = dispatch(&state, &parts.method, &parts.uri, body, &mut metadata)
+        let (mut head, stream) = dispatch(&state, &parts, body)
             .await
             .unwrap_or_else(|error| (error.into_response(), None));
         finish_response(&mut head, stream.is_some(), &context);
-        context.log_completed(head.status_code, start.elapsed());
-
-        let mut response =
-            axum::response::Response::new(stream.unwrap_or_else(|| AxumBody::from(head.body)));
-        *response.status_mut() =
-            StatusCode::from_u16(head.status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        for (name, value) in head.headers {
-            if let (Ok(name), Ok(value)) =
-                (name.parse::<HeaderName>(), value.parse::<HeaderValue>())
-            {
-                response.headers_mut().append(name, value);
-            }
+        context.log_completed(head.status_code(), start.elapsed());
+        match stream {
+            Some(stream) => head.map(|_| stream),
+            None => head.map(AxumBody::from),
         }
-        response
     }
     .instrument(span)
     .await
@@ -55,33 +40,33 @@ pub(super) async fn handle_http(
 /// 本文を流す応答は2つ目の値に本文 stream を返す。
 async fn dispatch(
     state: &AppState,
-    method: &axum::http::Method,
-    uri: &axum::http::Uri,
+    parts: &Parts,
     body: AxumBody,
-    metadata: &mut Request,
-) -> Result<(Response, Option<AxumBody>), ApiError> {
+) -> Result<(Reply, Option<AxumBody>), ApiError> {
     use axum::body::to_bytes;
-    let (path, query) = (uri.path(), uri.query());
-    check_request_source(method, path, metadata)?;
+    let (method, headers) = (&parts.method, &parts.headers);
+    let (path, query) = (parts.uri.path(), parts.uri.query());
+    check_request_source(method, path, headers)?;
     let lookup = routes::lookup(method.as_str(), path);
     if let Lookup::Found(route, param) = lookup
         && route.body == Body::Stream
     {
         return match route.endpoint {
-            Endpoint::S3PutObjectStream => crate::s3_upload::upload(body, metadata, state)
-                .await
-                .map(|r| (r, None)),
+            Endpoint::S3PutObjectStream => {
+                crate::s3_upload::upload(body, &parts.uri, headers, state)
+                    .await
+                    .map(|r| (r, None))
+            }
             Endpoint::S3Preview => {
                 let (bucket, key) = parse_preview_bucket_and_key(param)?;
-                let reply =
-                    s3_handler::preview_object_stream(state, bucket, key, &metadata.headers)
-                        .await?;
-                let mut head = Response::new(reply.status_code, reason_phrase(reply.status_code));
-                for (name, value) in reply.headers {
-                    head.add_header(&name, &value);
+                let preview =
+                    s3_handler::preview_object_stream(state, bucket, key, headers).await?;
+                let mut head = reply(preview.status_code);
+                for (name, value) in &preview.headers {
+                    append_header(&mut head, name, value);
                 }
                 // reqwest/axumのbackpressureで全量を保持せず転送する。
-                let stream = reply.body_stream.bytes_stream();
+                let stream = preview.body_stream.bytes_stream();
                 Ok((head, Some(AxumBody::from_stream(stream))))
             }
             other => Err(ApiError::InternalServerError(format!(
@@ -118,25 +103,24 @@ async fn dispatch(
                 ));
             }
         };
-    if json_only && !is_json_request(method, &bytes, metadata) {
+    if json_only && !is_json_request(method, &bytes, headers) {
         return Ok((
             problem_details_response(415, "Content-Type must be application/json"),
             None,
         ));
     }
-    metadata.body = bytes.to_vec();
-    let response = route_request(metadata, state, path, query).await?;
+    let response = route_request(state, method.as_str(), headers, &bytes, path, query).await?;
     Ok((response, None))
 }
 
 /// すべての応答に1回だけ適用する後処理。
-fn finish_response(response: &mut Response, streamed: bool, context: &RequestContext) {
+fn finish_response(response: &mut Reply, streamed: bool, context: &RequestContext) {
     // 本文を流す応答は上流の本文をそのまま返すため、problem details へ置き換えない。
     if !streamed {
         apply_problem_details(response);
     }
     apply_s3_cors(&context.path, response);
-    response.add_header("x-request-id", &context.request_id);
+    append_header(response, "x-request-id", &context.request_id);
 }
 
 /// アクセスログに使う要求の属性。
@@ -150,29 +134,31 @@ struct RequestContext {
 }
 
 impl RequestContext {
-    fn new(request: &Request, path: &str, query: Option<&str>) -> Self {
-        let header = |name: &str| request.get_header(name).map(ToString::to_string);
+    fn new(parts: &Parts) -> Self {
+        let header = |name: &str| request_header(&parts.headers, name).map(ToString::to_string);
         Self {
             request_id: header("x-request-id").unwrap_or_else(request_id::generate_request_id),
-            method: request.method.clone(),
-            path: path.to_string(),
-            query: query.map(ToString::to_string),
+            method: parts.method.to_string(),
+            path: parts.uri.path().to_string(),
+            query: parts.uri.query().map(ToString::to_string),
             user_agent: header("user-agent"),
             client_ip: header("x-forwarded-for").or_else(|| header("x-real-ip")),
         }
     }
 
-    fn span(&self, request: &Request) -> tracing::Span {
+    fn span(&self, parts: &Parts) -> tracing::Span {
+        let content_length = request_header(&parts.headers, "content-length")
+            .and_then(|value| value.trim().parse::<usize>().ok());
         info_span!(
             "http_request",
             request_id = %self.request_id,
             method = %self.method,
             path = %self.path,
             query = ?self.query,
-            version = %request.version,
+            version = ?parts.version,
             user_agent = ?self.user_agent,
             client_ip = ?self.client_ip,
-            content_length = ?request.content_length(),
+            content_length = ?content_length,
             status = tracing::field::Empty,
             latency_ms = tracing::field::Empty,
             error = tracing::field::Empty,
@@ -225,20 +211,21 @@ impl RequestContext {
     }
 }
 
-fn apply_problem_details(response: &mut Response) {
-    if !(400..=599).contains(&response.status_code) {
+fn apply_problem_details(response: &mut Reply) {
+    let status = response.status_code();
+    if !(400..=599).contains(&status) {
         return;
     }
 
     let is_problem_details = response
-        .get_header("content-type")
+        .header_str("content-type")
         .map(|value| value.starts_with("application/problem+json"))
         .unwrap_or(false);
     if is_problem_details {
         return;
     }
 
-    *response = problem_details_response(response.status_code, reason_phrase(response.status_code));
+    *response = problem_details_response(status, reason_phrase(status));
 }
 
 // raw HTTP fixtureも本番と同じRouterを使う。wire処理はHyperへ任せる。
@@ -255,23 +242,42 @@ where
         .await;
 }
 
-/// 本文を読み込み済みの要求を handler へ渡し、HTTP 層と同じ後処理をした応答を返す。
+/// テスト用の窓口。本文を読み込み済みの要求を本番と同じ流れで handler へ渡し、後処理をした応答を返す。
+///
+/// テストは shiguredo の `Request`/`Response` で要求を組み立て、結果を確かめる。
 #[cfg(test)]
-pub(super) async fn process_request(request: Request, app_state: &AppState) -> Response {
-    let (path, query) = split_uri(&request.uri);
-    let context = RequestContext::new(&request, path, query);
-    let mut response = route_request(&request, app_state, path, query)
-        .await
-        .unwrap_or_else(ApiError::into_response);
-    finish_response(&mut response, false, &context);
-    response
-}
-
-#[cfg(test)]
-fn split_uri(uri: &str) -> (&str, Option<&str>) {
-    if let Some((path, query)) = uri.split_once('?') {
-        (path, Some(query))
-    } else {
-        (uri, None)
+pub(super) async fn process_request(
+    request: shiguredo_http11::Request,
+    app_state: &AppState,
+) -> shiguredo_http11::Response {
+    let mut builder = axum::http::Request::builder()
+        .method(request.method.as_str())
+        .uri(request.uri.as_str());
+    for (name, value) in &request.headers {
+        builder = builder.header(name.as_str(), value.as_str());
     }
+    let (parts, ()) = builder.body(()).unwrap().into_parts();
+    let context = RequestContext::new(&parts);
+    let (path, query) = (parts.uri.path(), parts.uri.query());
+    let mut response = route_request(
+        app_state,
+        parts.method.as_str(),
+        &parts.headers,
+        &request.body,
+        path,
+        query,
+    )
+    .await
+    .unwrap_or_else(ApiError::into_response);
+    finish_response(&mut response, false, &context);
+    let mut converted = shiguredo_http11::Response::new(
+        response.status_code(),
+        reason_phrase(response.status_code()),
+    );
+    for (name, value) in response.headers() {
+        if let Ok(value) = value.to_str() {
+            converted.add_header(name.as_str(), value);
+        }
+    }
+    converted.body(response.body().to_vec())
 }

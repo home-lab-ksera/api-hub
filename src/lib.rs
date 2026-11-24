@@ -7,6 +7,7 @@ pub mod logging;
 pub mod media;
 pub mod notifications;
 pub mod queue_metrics;
+pub mod reply;
 pub mod request_id;
 mod s3_upload;
 pub mod server;
