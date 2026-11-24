@@ -225,7 +225,16 @@ fn apply_problem_details(response: &mut Reply) {
         return;
     }
 
-    *response = problem_details_response(status, reason_phrase(status));
+    // 本文と Content-Type だけを置き換え、handler が付けた Cache-Control などは残す。
+    let mut replacement = problem_details_response(status, reason_phrase(status));
+    for (name, value) in response.headers() {
+        if name != axum::http::header::CONTENT_TYPE && name != axum::http::header::CONTENT_LENGTH {
+            replacement
+                .headers_mut()
+                .append(name.clone(), value.clone());
+        }
+    }
+    *response = replacement;
 }
 
 // raw HTTP fixtureも本番と同じRouterを使う。wire処理はHyperへ任せる。

@@ -1130,12 +1130,13 @@ async fn browser_open_redirects_to_the_signed_url() {
     };
     let uri = "/s3/browser_open?bucket=pdfs&key=hitomi%2Fa.pdf";
     let response = process_request(Request::new("GET", uri), &state).await;
-    // HTTP 層が汎用の problem details に置き換えるため、Cache-Control は残らない（以前からの挙動）。
+    // 本文は汎用の problem details になるが、handler が付けた Cache-Control は残る。
     assert_eq!(response.status_code, 503);
     assert_eq!(
         response.get_header("content-type"),
         Some("application/problem+json")
     );
+    assert_eq!(response.get_header("cache-control"), Some("no-store"));
 
     state.settings.s3_browser_endpoint = Some("https://s3.example".into());
     let response = process_request(Request::new("GET", uri), &state).await;
