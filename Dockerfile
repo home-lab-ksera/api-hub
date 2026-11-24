@@ -2,7 +2,7 @@ FROM rust:1.99.1-alpine3.22 AS builder
 
 WORKDIR /src
 
-RUN apk add --no-cache build-base cmake perl ca-certificates
+RUN apk add --no-cache build-base ca-certificates
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src

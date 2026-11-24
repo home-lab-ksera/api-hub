@@ -30,7 +30,7 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", default-features = false, features = ["json", "env-filter", "fmt"] }
 
 url = "2.5"
-sqlx = { version = "0.8.6", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "migrate", "macros"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring", "migrate", "macros"] }
 
 [dev-dependencies]
 hyper = { version = "1", features = ["server", "http1"] }
