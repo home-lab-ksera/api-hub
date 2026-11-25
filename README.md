@@ -159,7 +159,7 @@ curl --fail-with-body 'http://localhost:3000/s3/put_object_stream?bucket=b&key=p
 api-hub に利用者認証はありません。Web ページからの不正な操作を防ぐため、次の制限があります。
 
 - `Origin` または `Sec-Fetch-Site` が付いた更新リクエスト（ブラウザーからの呼び出し）は、
-  許可した画面（`https://dashboard.internal.qroksera.com`。移行中は旧 viewer の `https://hitomi-upload-viewer.internal.qroksera.com` も）から `/s3/list_objects_v2`・`/s3/browser_get_object`・
+  許可した画面（`https://dashboard.internal.qroksera.com`）から `/s3/list_objects_v2`・`/s3/browser_get_object`・
   `/s3/presigned_get_object`・`/s3/put_object_stream` への呼び出しだけを受け付けます（それ以外は 403）。
   クラスタ内のクライアントはこれらのヘッダーを送らないため、影響を受けません。
 - `GET /s3/preview/...` は、PDF・画像（SVG を除く）・動画・音声だけをブラウザー内で表示します。
