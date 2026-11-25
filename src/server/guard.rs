@@ -6,11 +6,7 @@ use crate::reply::{Reply, append_header, request_header};
 use axum::http::HeaderMap;
 
 /// ブラウザーから S3 の経路を呼べる画面のオリジン。先頭は Origin のない要求に返す既定値。
-/// viewer を dashboard へ移す間だけ両方を許可する（home-lab-k8s tasks/dashboard-consolidation-plan.md）。
-const S3_CORS_ALLOWED_ORIGINS: &[&str] = &[
-    "https://hitomi-upload-viewer.internal.qroksera.com",
-    "https://dashboard.internal.qroksera.com",
-];
+const S3_CORS_ALLOWED_ORIGINS: &[&str] = &["https://dashboard.internal.qroksera.com"];
 
 fn allowed_origin(origin: Option<&str>) -> Option<&'static str> {
     let origin = origin?;
