@@ -119,7 +119,7 @@ fn finish_response(response: &mut Reply, streamed: bool, context: &RequestContex
     if !streamed {
         apply_problem_details(response);
     }
-    apply_s3_cors(&context.path, response);
+    apply_s3_cors(&context.path, context.origin.as_deref(), response);
     append_header(response, "x-request-id", &context.request_id);
 }
 
@@ -131,6 +131,8 @@ struct RequestContext {
     query: Option<String>,
     user_agent: Option<String>,
     client_ip: Option<String>,
+    /// CORS の応答に使う。
+    origin: Option<String>,
 }
 
 impl RequestContext {
@@ -143,6 +145,7 @@ impl RequestContext {
             query: parts.uri.query().map(ToString::to_string),
             user_agent: header("user-agent"),
             client_ip: header("x-forwarded-for").or_else(|| header("x-real-ip")),
+            origin: header("origin"),
         }
     }
 

@@ -537,6 +537,7 @@ async fn http_interface_matches_golden() {
         "",
         "Content-Type: text/plain\r\n",
         "Origin: https://hitomi-upload-viewer.internal.qroksera.com\r\nContent-Type: application/json\r\n",
+        "Origin: https://dashboard.internal.qroksera.com\r\nContent-Type: application/json\r\n",
         "Origin: https://attacker.example\r\nContent-Type: application/json\r\n",
         "Sec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\n",
     ];
